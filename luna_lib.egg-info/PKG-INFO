@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: luna_lib
+Version: 1.0.0
+Summary: Complete cryptocurrency wallet and mining system
+Author: Luna Crypto
+Author-email: taellinglin@gmail.com
+Keywords: cryptocurrency wallet mining blockchain
+Requires-Python: >=3.7
+Requires-Dist: requests>=2.25.0
+Requires-Dist: cryptography>=3.4.0
+Requires-Dist: Pillow>=8.0.0
+Dynamic: author
+Dynamic: author-email
+Dynamic: keywords
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

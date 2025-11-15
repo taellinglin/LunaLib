@@ -1,0 +1,5 @@
+core
+gtx
+mining
+storage
+transactions

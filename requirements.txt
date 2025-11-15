@@ -1,0 +1,39 @@
+# Core dependencies
+requests>=2.31.0                    # HTTP requests for blockchain API calls
+cryptography>=41.0.0                # Encryption for wallet security
+qrcode[pil]>=7.4.0                  # QR code generation for addresses
+Pillow>=10.0.0                      # Image processing for QR codes
+
+# Testing dependencies
+pytest>=7.4.0                       # Test framework
+pytest-cov>=4.1.0                   # Test coverage
+pytest-mock>=3.11.0                 # Mocking for tests
+coverage>=7.0.0                     # Coverage reporting
+
+# Standard library backports (if needed for older Python versions)
+typing-extensions>=4.0.0            # Additional type hints
+importlib-metadata>=6.0.0           # Metadata for packages
+
+# Optional GPU acceleration (choose one based on your hardware)
+# Uncomment the appropriate line for your setup:
+
+# NVIDIA CUDA 12.x (latest)
+# cupy-cuda12x>=12.0.0
+
+# NVIDIA CUDA 11.x
+# cupy-cuda11x>=11.0.0
+
+# AMD ROCm
+# cupy-rocm-5-0>=12.0.0
+
+# CPU-only fallback (slower but works everywhere)
+
+# Development and code quality
+black>=23.0.0                       # Code formatting
+flake8>=6.0.0                       # Linting
+mypy>=1.5.0                         # Type checking
+isort>=5.12.0                       # Import sorting
+
+# Type stubs for better IDE support
+types-requests>=2.31.0
+types-PyYAML>=6.0.0
