@@ -1,8 +1,9 @@
+from storage.cache import BlockchainCache
 import requests
 import time
 import json
 from typing import Dict, List, Optional, Tuple
-from ..storage.cache import BlockchainCache
+
 
 class BlockchainManager:
     """Manages blockchain interactions and scanning"""

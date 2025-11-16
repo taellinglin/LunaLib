@@ -3,8 +3,8 @@ import hashlib
 import json
 import threading
 from typing import Dict, Optional
-from .difficulty import DifficultySystem
-from ..gtx.digital_bill import DigitalBill
+from mining.difficulty import DifficultySystem
+from gtx.digital_bill import DigitalBill
 
 class GenesisMiner:
     """Mines GTX Genesis bills with configurable difficulty"""
