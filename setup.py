@@ -45,4 +45,10 @@ setup(
     package_data={
         "luna_lib": ["py.typed"],
     },
+    # Add this for universal wheels (pure Python)
+    options={
+        'bdist_wheel': {
+            'universal': True
+        }
+    }
 )
