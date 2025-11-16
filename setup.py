@@ -7,7 +7,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 setup(
-    name="luna-lib",
+    name="lunalib",
     version="1.0.0",
     author="Ling Lin",
     author_email="taellinglin@gmail.com",
@@ -43,7 +43,7 @@ setup(
     },
     include_package_data=True,
     package_data={
-        "luna_lib": ["py.typed"],
+        "lunalib": ["py.typed"],
     },
     # Add this for universal wheels (pure Python)
     options={
