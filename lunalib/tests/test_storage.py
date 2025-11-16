@@ -2,8 +2,8 @@ import pytest
 import json
 import tempfile
 import os
-from storage.encryption import EncryptionManager
-from storage.database import WalletDatabase
+from lunalib.storage.encryption import EncryptionManager
+from lunalib.storage.database import WalletDatabase
 
 class TestStorage:
     def test_encryption_decryption(self):

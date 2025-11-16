@@ -1,6 +1,6 @@
 import pytest
 import time
-from transactions.transactions import TransactionManager, TransactionSecurity, TransactionValidator
+from lunalib.transactions.transactions import TransactionManager, TransactionSecurity, TransactionValidator
 
 class TestTransactions:
     def test_transaction_creation(self, test_wallet, sample_transaction_data):

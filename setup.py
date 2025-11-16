@@ -38,7 +38,7 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "luna-wallet=luna_lib.cli:main",
+            "luna-wallet=lunalib.cli:main",
         ],
     },
     include_package_data=True,

@@ -1,8 +1,8 @@
 import pytest
 import time
 from unittest.mock import Mock, patch
-from mining.miner import GenesisMiner
-from mining.difficulty import DifficultySystem
+from lunalib.mining.miner import GenesisMiner
+from lunalib.mining.difficulty import DifficultySystem
 
 class TestMining:
     def test_difficulty_system(self):
@@ -122,7 +122,7 @@ class TestMining:
         assert zero_reward == 0
         assert negative_reward == 0
 
-    @patch('mining.miner.GenesisMiner._perform_mining')
+    @patch('lunalib.mining.miner.GenesisMiner._perform_mining')
     def test_bill_mining_success(self, mock_mining, test_miner, test_wallet):
         """Test successful bill mining across different tiers"""
         wallet, wallet_data = test_wallet
@@ -152,7 +152,7 @@ class TestMining:
             assert 'bill_serial' in result
             assert 'mining_time' in result
 
-    @patch('mining.miner.GenesisMiner._perform_mining')
+    @patch('lunalib.mining.miner.GenesisMiner._perform_mining')
     def test_high_difficulty_mining(self, mock_mining, test_miner, test_wallet):
         """Test mining for high difficulty tiers"""
         wallet, wallet_data = test_wallet
@@ -208,7 +208,7 @@ class TestMining:
             assert result['success'] is False
             assert 'error' in result
 
-    @patch('mining.miner.GenesisMiner._perform_mining')
+    @patch('lunalib.mining.miner.GenesisMiner._perform_mining')
     def test_mining_failure(self, mock_mining, test_miner, test_wallet):
         """Test mining failure scenarios"""
         wallet, wallet_data = test_wallet

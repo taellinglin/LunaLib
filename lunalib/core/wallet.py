@@ -30,8 +30,13 @@ class LunaWallet:
         self.is_locked = True
 
     def _generate_address(self):
-        """Generate wallet address"""
-        base_data = f"LUN_{int(time.time()*1000)}_{hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]}"
+        """Generate unique wallet address"""
+        import secrets
+        import time
+        # Use cryptographically secure random data for uniqueness
+        random_data = secrets.token_hex(32)
+        timestamp_ns = time.time_ns()  # More precise timestamp
+        base_data = f"LUN_{timestamp_ns}_{random_data}"
         return hashlib.sha256(base_data.encode()).hexdigest()[:32]
     
     def _generate_private_key(self):

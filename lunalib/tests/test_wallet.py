@@ -1,7 +1,7 @@
 import pytest
 import os
 import json
-from core.wallet import LunaWallet
+from lunalib.core.wallet import LunaWallet
 
 class TestLunaWallet:
     def test_wallet_creation(self, test_wallet):

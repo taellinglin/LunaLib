@@ -1,5 +1,5 @@
 import pytest
-from core.crypto import KeyManager
+from lunalib.core.crypto import KeyManager
 
 class TestCrypto:
     def test_key_generation(self):

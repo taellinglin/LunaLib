@@ -5,9 +5,9 @@ import json
 from typing import Dict, List, Optional
 from .digital_bill import DigitalBill
 from .bill_registry import BillRegistry
-from mining.cuda_manager import CUDAManager
-from core.blockchain import BlockchainManager
-from transactions.transactions import TransactionManager
+from lunalib.mining.cuda_manager import CUDAManager
+from lunalib.core.blockchain import BlockchainManager
+from lunalib.transactions.transactions import TransactionManager
 class GTXGenesis:
     """Main GTX Genesis system manager"""
     
@@ -43,11 +43,22 @@ class GTXGenesis:
                 return {'valid': False, 'error': 'Invalid bill serial'}
             
             # Look up the bill in your registry/database
-            bill_data = self.bill_registry.get_bill(bill_serial)
-            if not bill_data:
+            bill_record = self.bill_registry.get_bill(bill_serial)  # This returns the full record
+            if not bill_record:
                 return {'valid': False, 'error': 'Bill not found in registry'}
             
-            # Extract signature components (same as endpoint)
+            # DEBUG: Print what we received
+            print(f"DEBUG: Full bill record: {bill_record}")
+            
+            # Extract the actual bill_data from the metadata field
+            bill_data = bill_record.get('metadata', {})
+            if not bill_data:
+                return {'valid': False, 'error': 'No bill data found in metadata'}
+            
+            # DEBUG: Print the extracted bill_data
+            print(f"DEBUG: Extracted bill_data: {bill_data}")
+            
+            # Extract signature components from bill_data (not from bill_record)
             public_key = bill_data.get('public_key')
             signature = bill_data.get('signature')
             metadata_hash = bill_data.get('metadata_hash', '')
@@ -85,16 +96,16 @@ class GTXGenesis:
             elif signature_valid is None:
                 try:
                     # Use the integrated DigitalBill class from your GTX system
-                    from gtx.digital_bill import DigitalBill  # Adjust import path as needed
+                    from lunalib.gtx.digital_bill import DigitalBill  # Adjust import path as needed
                     
                     # Create DigitalBill object with the transaction data
                     digital_bill = DigitalBill(
-                        denomination=float(denomination) if denomination.replace('.', '').isdigit() else 0,
+                        denomination=float(denomination) if str(denomination).replace('.', '').isdigit() else 0,
                         user_address=issued_to,
                         difficulty=0,  # Not needed for verification
                         bill_type=bill_type,
                         front_serial=front_serial,
-                        back_serial=tx_data.get('back_serial', ''),
+                        back_serial=bill_data.get('back_serial', ''),
                         metadata_hash=metadata_hash,
                         public_key=public_key,
                         signature=signature
@@ -210,8 +221,8 @@ class GTXGenesis:
     def verify_digital_signature(self, bill_serial):
         """Verify digital signature of a bill using LunaLib cryptography"""
         try:
-            from core.crypto import verify_signature
-            from storage.cache import get_bill_data
+            from lunalib.core.crypto import verify_signature
+            from lunalib.storage.cache import get_bill_data
             
             # Get bill data from cache or storage
             bill_data = get_bill_data(bill_serial)
@@ -239,7 +250,7 @@ class GTXGenesis:
     def get_transaction_by_serial(self, serial_number):
         """Get transaction by serial number from blockchain"""
         try:
-            from core.blockchain import BlockchainManager
+            from lunalib.core.blockchain import BlockchainManager
             blockchain_mgr = BlockchainManager()
             
             # Search through blockchain for this serial

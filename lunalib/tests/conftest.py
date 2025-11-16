@@ -2,9 +2,9 @@ import pytest
 import tempfile
 import os
 import time
-from core.wallet import LunaWallet
-from mining.miner import GenesisMiner
-from gtx.genesis import GTXGenesis
+from lunalib.core.wallet import LunaWallet
+from lunalib.mining.miner import GenesisMiner
+from lunalib.gtx.genesis import GTXGenesis
 
 @pytest.fixture
 def temp_dir():

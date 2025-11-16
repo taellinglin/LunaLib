@@ -1,4 +1,4 @@
-from storage.cache import BlockchainCache
+from lunalib.storage.cache import BlockchainCache
 import requests
 import time
 import json
