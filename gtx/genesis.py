@@ -84,23 +84,59 @@ class GTXGenesis:
             # METHOD 3: Check DigitalBill calculated hash
             elif signature_valid is None:
                 try:
-                    from signatures import DigitalBill
+                    # Use the integrated DigitalBill class from your GTX system
+                    from gtx.digital_bill import DigitalBill  # Adjust import path as needed
+                    
+                    # Create DigitalBill object with the transaction data
                     digital_bill = DigitalBill(
+                        denomination=float(denomination) if denomination.replace('.', '').isdigit() else 0,
+                        user_address=issued_to,
+                        difficulty=0,  # Not needed for verification
                         bill_type=bill_type,
                         front_serial=front_serial,
-                        back_serial=bill_data.get('back_serial', ''),
+                        back_serial=tx_data.get('back_serial', ''),
                         metadata_hash=metadata_hash,
-                        timestamp=timestamp,
-                        issued_to=issued_to,
-                        denomination=denomination
+                        public_key=public_key,
+                        signature=signature
                     )
+                    
+                    # Set the timestamp from the transaction data
+                    digital_bill.timestamp = timestamp
+                    digital_bill.issued_to = issued_to
+                    
+                    # Try multiple verification approaches:
+                    
+                    # Approach 1: Check if signature matches calculate_hash()
                     calculated_hash = digital_bill.calculate_hash()
                     if signature == calculated_hash:
                         signature_valid = True
-                        verification_method = "digital_bill_hash"
+                        verification_method = "digital_bill_calculate_hash"
                         print(f"✅ Verified: DigitalBill.calculate_hash()")
+                        print(f"   Calculated hash: {calculated_hash}")
+                    
+                    # Approach 2: Use the verify() method (checks all signature types)
+                    elif digital_bill.verify():
+                        signature_valid = True
+                        verification_method = "digital_bill_verify_method"
+                        print(f"✅ Verified: DigitalBill.verify()")
+                    
+                    # Approach 3: Check if signature matches metadata_hash generation
+                    elif signature == digital_bill._generate_metadata_hash():
+                        signature_valid = True
+                        verification_method = "digital_bill_metadata_hash"
+                        print(f"✅ Verified: matches generated metadata_hash")
+                    
+                    else:
+                        print(f"❌ DigitalBill verification failed:")
+                        print(f"   Calculated hash: {calculated_hash}")
+                        print(f"   Signature: {signature}")
+                        print(f"   Metadata hash: {metadata_hash}")
+                        print(f"   Public key: {public_key}")
+                        
                 except Exception as e:
                     print(f"DigitalBill verification error: {e}")
+                    import traceback
+                    print(f"Traceback: {traceback.format_exc()}")
             
             # METHOD 4: Check simple concatenation hash
             elif signature_valid is None and signature:
