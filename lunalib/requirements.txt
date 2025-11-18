@@ -33,7 +33,7 @@ typing-extensions>=4.8.0            # Additional type hints
 # Uncomment the appropriate line for your setup:
 
 # NVIDIA CUDA 12.x (latest)
-cupy-cuda12x>=12.0.0
+#cupy-cuda12x>=12.0.0
 
 # NVIDIA CUDA 11.x
 # cupy-cuda11x>=11.0.0
