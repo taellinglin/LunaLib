@@ -5,9 +5,11 @@ Summary: A Complete Cryptocurrency Wallet and Mining System
 Home-page: https://github.com/taellinglin/LunaLib
 Author: Ling Lin
 Author-email: taellinglin@gmail.com
+License: MIT
 Project-URL: Bug Tracker, https://github.com/taellinglin/LunaLib/issues
 Project-URL: Documentation, https://linglin.art/docs/luna-lib
 Project-URL: Source Code, https://github.com/taellinglin/LunaLib
+Keywords: cryptocurrency,blockchain,wallet,mining,bitcoin,ethereum,crypto
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
 Classifier: License :: OSI Approved :: MIT License
@@ -17,8 +19,10 @@ Classifier: Programming Language :: Python :: 3.7
 Classifier: Programming Language :: Python :: 3.8
 Classifier: Programming Language :: Python :: 3.9
 Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
 Classifier: Topic :: Security :: Cryptography
 Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Classifier: Topic :: Office/Business :: Financial
 Requires-Python: >=3.7
 Description-Content-Type: text/markdown
 Requires-Dist: requests>=2.31.0
@@ -40,13 +44,14 @@ Requires-Dist: sphinx>=7.0.0
 Requires-Dist: sphinx-rtd-theme>=1.3.0
 Requires-Dist: types-requests>=2.31.0
 Requires-Dist: typing-extensions>=4.8.0
-Requires-Dist: cupy-cuda12x>=12.0.0
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier
 Dynamic: description
 Dynamic: description-content-type
 Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
 Dynamic: project-url
 Dynamic: requires-dist
 Dynamic: requires-python

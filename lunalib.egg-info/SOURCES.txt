@@ -3,6 +3,7 @@ setup.py
 lunalib/__init__.py
 lunalib/cli.py
 lunalib/luna_lib.py
+lunalib/requirements.txt
 lunalib.egg-info/PKG-INFO
 lunalib.egg-info/SOURCES.txt
 lunalib.egg-info/dependency_links.txt

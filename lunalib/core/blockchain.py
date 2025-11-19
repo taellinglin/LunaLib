@@ -14,24 +14,35 @@ class BlockchainManager:
         self.network_connected = False
         
     def get_blockchain_height(self) -> int:
-        """Get current blockchain height"""
+        """Get current blockchain height - FIXED VERSION"""
         try:
-            # Try height endpoint first
-            response = requests.get(f'{self.endpoint_url}/blockchain/height', timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('height', 0)
-            
-            # Fallback to blocks endpoint
+            # Method 1: Try the blocks endpoint (most reliable)
             response = requests.get(f'{self.endpoint_url}/blockchain/blocks', timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 blocks = data.get('blocks', [])
-                return len(blocks)
+                
+                # Calculate height correctly
+                if blocks:
+                    # Height should be the index of the latest block
+                    latest_block_index = blocks[-1].get('index', len(blocks) - 1)
+                    print(f"📊 Blocks count: {len(blocks)}, Latest block index: {latest_block_index}")
+                    return latest_block_index
+                else:
+                    return 0  # No blocks yet
+                    
+            # If blocks endpoint fails, try height endpoint as fallback
+            response = requests.get(f'{self.endpoint_url}/blockchain/height', timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                height = data.get('height', 0)
+                print(f"📊 Height endpoint returned: {height}")
+                return height
                 
         except Exception as e:
             print(f"Blockchain height error: {e}")
             
+        print("⚠️  Using fallback height: 0")
         return 0
     
     def get_block(self, height: int) -> Optional[Dict]:
