@@ -12,6 +12,7 @@ class BlockchainCache:
         if cache_dir is None:
             cache_dir = os.path.join(os.path.expanduser("~"), ".luna_wallet")
         self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
         self.cache_file = os.path.join(cache_dir, "blockchain_cache.db")
         self._init_cache()
     
