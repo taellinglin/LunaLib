@@ -170,6 +170,26 @@ class MempoolManager:
             if address is None or tx.get('from') == address or tx.get('to') == address:
                 transactions.append(tx)
         return transactions
+
+    def get_pending_transactions_for_addresses(self, addresses: List[str]) -> Dict[str, List[Dict]]:
+        """Get pending transactions mapped per address in one pass."""
+        if not addresses:
+            return {}
+
+        address_set = set(addresses)
+        results: Dict[str, List[Dict]] = {addr: [] for addr in addresses}
+
+        for tx_data in self.local_mempool.values():
+            tx = tx_data['transaction']
+            from_addr = tx.get('from') or tx.get('sender')
+            to_addr = tx.get('to') or tx.get('receiver')
+
+            if from_addr in address_set:
+                results[from_addr].append(tx)
+            if to_addr in address_set:
+                results[to_addr].append(tx)
+
+        return {addr: txs for addr, txs in results.items() if txs}
     
     def remove_transaction(self, tx_hash: str):
         """Remove transaction from mempool (usually after confirmation)"""

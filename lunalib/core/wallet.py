@@ -7,7 +7,7 @@ import binascii
 import base64
 import threading
 import concurrent.futures
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, List, Tuple
 from cryptography.fernet import Fernet
 from ..core.crypto import KeyManager
 
@@ -26,6 +26,8 @@ class LunaWallet:
         self.last_balance_update = 0
         self.balance_update_interval = 30  # seconds
         self._reset_current_wallet()
+        self._confirmed_tx_cache: Dict[str, List[Dict]] = {}
+        self._pending_tx_cache: Dict[str, List[Dict]] = {}
         
         
     def _reset_current_wallet(self):
@@ -265,6 +267,132 @@ class LunaWallet:
         except Exception as e:
             print(f"DEBUG: Error calculating available balance: {e}")
             return self.balance  # Fallback to total balance
+
+    def _compute_confirmed_balance(self, transactions: List[Dict]) -> float:
+        """Compute confirmed balance from a list of transactions."""
+        total_balance = 0.0
+        for tx in transactions:
+            tx_type = (tx.get('type') or '').lower()
+            direction = tx.get('direction', '')
+            amount = float(tx.get('amount', 0) or 0)
+
+            if tx_type == 'reward' or tx.get('from') == 'network':
+                total_balance += amount
+            elif direction == 'incoming':
+                total_balance += amount
+            elif direction == 'outgoing':
+                fee = float(tx.get('fee', 0) or 0)
+                total_balance -= amount
+                total_balance -= fee
+
+        return max(0.0, total_balance)
+
+    def _compute_pending_totals(self, pending_txs: List[Dict], address: str) -> Tuple[float, float]:
+        """Return (pending_outgoing, pending_incoming) for an address."""
+        pending_out = 0.0
+        pending_in = 0.0
+
+        for tx in pending_txs:
+            if tx.get('from') == address:
+                amount = float(tx.get('amount', 0) or 0)
+                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                pending_out += amount + fee
+            if tx.get('to') == address:
+                amount = float(tx.get('amount', 0) or 0)
+                pending_in += amount
+
+        return pending_out, pending_in
+
+    def _recompute_balances_from_cache(self) -> Dict[str, Dict[str, float]]:
+        """Recompute balances for all wallets from cached tx sets."""
+        updated: Dict[str, Dict[str, float]] = {}
+
+        for addr, wallet_data in self.wallets.items():
+            confirmed = self._confirmed_tx_cache.get(addr, [])
+            pending = self._pending_tx_cache.get(addr, [])
+
+            total_balance = self._compute_confirmed_balance(confirmed)
+            pending_out, pending_in = self._compute_pending_totals(pending, addr)
+            available_balance = max(0.0, total_balance - pending_out)
+
+            wallet_data['balance'] = total_balance
+            wallet_data['available_balance'] = available_balance
+
+            if addr == self.current_wallet_address:
+                self.balance = total_balance
+                self.available_balance = available_balance
+
+            updated[addr] = {
+                'balance': total_balance,
+                'available_balance': available_balance,
+                'pending_out': pending_out,
+                'pending_in': pending_in
+            }
+
+        return updated
+
+    def refresh_all_wallet_balances(self) -> Dict[str, Dict[str, float]]:
+        """Scan blockchain once for all wallets, then update balances with pending mempool data."""
+        addresses = list(self.wallets.keys())
+        if not addresses:
+            return {}
+
+        try:
+            from lunalib.core.blockchain import BlockchainManager
+            from lunalib.core.mempool import MempoolManager
+
+            blockchain = BlockchainManager()
+            mempool = MempoolManager()
+
+            confirmed_map = blockchain.scan_transactions_for_addresses(addresses)
+            pending_map = mempool.get_pending_transactions_for_addresses(addresses)
+
+            # Reset caches with the latest snapshots
+            self._confirmed_tx_cache = confirmed_map
+            self._pending_tx_cache = pending_map
+
+            return self._recompute_balances_from_cache()
+
+        except Exception as e:
+            print(f"DEBUG: Error refreshing all wallet balances: {e}")
+            return {}
+
+    def _apply_transaction_updates(self, confirmed_map: Dict[str, List[Dict]], pending_map: Dict[str, List[Dict]]):
+        """Update caches from monitor callbacks and recompute balances."""
+        for addr, txs in confirmed_map.items():
+            self._confirmed_tx_cache.setdefault(addr, []).extend(txs)
+
+        for addr, txs in pending_map.items():
+            self._pending_tx_cache[addr] = txs
+
+        return self._recompute_balances_from_cache()
+
+    def start_wallet_monitoring(self, poll_interval: int = 15):
+        """Start monitoring blockchain and mempool for all wallets."""
+        addresses = list(self.wallets.keys())
+        if not addresses:
+            print("DEBUG: No wallets to monitor")
+            return None
+
+        from lunalib.core.blockchain import BlockchainManager
+        blockchain = BlockchainManager()
+
+        # Run an initial refresh to seed caches and balances
+        self.refresh_all_wallet_balances()
+
+        def _on_update(payload: Dict):
+            confirmed_map = payload.get('confirmed', {}) or {}
+            pending_map = payload.get('pending', {}) or {}
+            self._apply_transaction_updates(confirmed_map, pending_map)
+
+        self._monitor_stop_event = blockchain.monitor_addresses(addresses, _on_update, poll_interval=poll_interval)
+        return self._monitor_stop_event
+
+    def stop_wallet_monitoring(self):
+        """Stop the background monitor if running."""
+        stop_event = getattr(self, '_monitor_stop_event', None)
+        if stop_event:
+            stop_event.set()
     def _get_pending_balance(self) -> float:
         """Get total pending balance from mempool (outgoing pending transactions)"""
         try:
@@ -323,28 +451,8 @@ class LunaWallet:
             
             blockchain = BlockchainManager()
             transactions = blockchain.scan_transactions_for_address(self.address)
-            
-            total_balance = 0.0
-            for tx in transactions:
-                tx_type = tx.get('type', '').lower()
-                direction = tx.get('direction', '')
-                
-                # For reward transactions (always incoming)
-                if tx_type == 'reward' or tx.get('from') == 'network':
-                    total_balance += float(tx.get('amount', 0))
-                    print(f"💰 Reward added: +{tx.get('amount', 0)}")
-                
-                # For regular transactions
-                elif direction == 'incoming':
-                    total_balance += float(tx.get('amount', 0))
-                    print(f"💰 Incoming added: +{tx.get('amount', 0)}")
-                
-                elif direction == 'outgoing':
-                    total_balance -= float(tx.get('amount', 0))
-                    total_balance -= float(tx.get('fee', 0))
-                    print(f"💰 Outgoing deducted: -{tx.get('amount', 0)} -{tx.get('fee', 0)} fee")
-            
-            return max(0.0, total_balance)
+            total_balance = self._compute_confirmed_balance(transactions)
+            return total_balance
             
         except Exception as e:
             print(f"DEBUG: Error getting blockchain balance: {e}")

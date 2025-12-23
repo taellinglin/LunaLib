@@ -14,6 +14,17 @@ class BlockchainManager:
         self.endpoint_url = endpoint_url.rstrip('/')
         self.cache = BlockchainCache()
         self.network_connected = False
+        self._stop_events = []  # Track background monitors so they can be stopped
+
+    # ------------------------------------------------------------------
+    # Address helpers
+    # ------------------------------------------------------------------
+    def _normalize_address(self, addr: str) -> str:
+        """Normalize LUN addresses for comparison (lowercase, strip, drop prefix)."""
+        if not addr:
+            return ''
+        addr_str = str(addr).strip("'\" ").lower()
+        return addr_str[4:] if addr_str.startswith('lun_') else addr_str
         
     def broadcast_transaction(self, transaction: Dict) -> Tuple[bool, str]:
         """Broadcast transaction to mempool with enhanced error handling"""
@@ -272,6 +283,89 @@ class BlockchainManager:
                 
         return transactions
 
+    def scan_transactions_for_addresses(self, addresses: List[str], start_height: int = 0, end_height: int = None) -> Dict[str, List[Dict]]:
+        """Scan the blockchain once for multiple addresses (rewards and transfers)."""
+        if not addresses:
+            return {}
+
+        if end_height is None:
+            end_height = self.get_blockchain_height()
+
+        if end_height < start_height:
+            return {addr: [] for addr in addresses}
+
+        # Map normalized address -> original address for quick lookup
+        normalized_map = {}
+        for addr in addresses:
+            norm = self._normalize_address(addr)
+            if norm:
+                normalized_map[norm] = addr
+
+        results: Dict[str, List[Dict]] = {addr: [] for addr in addresses}
+
+        batch_size = 100
+        for batch_start in range(start_height, end_height + 1, batch_size):
+            batch_end = min(batch_start + batch_size - 1, end_height)
+            blocks = self.get_blocks_range(batch_start, batch_end)
+
+            for block in blocks:
+                collected = self._collect_transactions_for_addresses(block, normalized_map)
+                for original_addr, txs in collected.items():
+                    if txs:
+                        results[original_addr].extend(txs)
+
+        return results
+
+    def monitor_addresses(self, addresses: List[str], on_update, poll_interval: int = 15):
+        """Start background monitor for addresses; returns a stop event."""
+        import threading
+        from lunalib.core.mempool import MempoolManager
+
+        stop_event = threading.Event()
+        self._stop_events.append(stop_event)
+
+        mempool = MempoolManager()
+        last_height = self.get_blockchain_height()
+
+        def _emit_update(confirmed_map: Dict[str, List[Dict]], pending_map: Dict[str, List[Dict]], source: str):
+            try:
+                if on_update:
+                    on_update({
+                        'confirmed': confirmed_map or {},
+                        'pending': pending_map or {},
+                        'source': source
+                    })
+            except Exception as e:
+                print(f"Monitor callback error: {e}")
+
+        def _monitor_loop():
+            nonlocal last_height
+
+            # Initial emission: existing chain + current mempool
+            initial_confirmed = self.scan_transactions_for_addresses(addresses, 0, last_height)
+            initial_pending = mempool.get_pending_transactions_for_addresses(addresses)
+            _emit_update(initial_confirmed, initial_pending, source="initial")
+
+            while not stop_event.wait(poll_interval):
+                try:
+                    current_height = self.get_blockchain_height()
+                    if current_height > last_height:
+                        new_confirmed = self.scan_transactions_for_addresses(addresses, last_height + 1, current_height)
+                        if any(new_confirmed.values()):
+                            _emit_update(new_confirmed, {}, source="blockchain")
+                        last_height = current_height
+
+                    pending_now = mempool.get_pending_transactions_for_addresses(addresses)
+                    if any(pending_now.values()):
+                        _emit_update({}, pending_now, source="mempool")
+
+                except Exception as e:
+                    print(f"Monitor loop error: {e}")
+
+        thread = threading.Thread(target=_monitor_loop, daemon=True)
+        thread.start()
+        return stop_event
+
     def submit_mined_block(self, block_data: Dict) -> bool:
         """Submit a mined block to the network with built-in validation"""
         try:
@@ -403,6 +497,92 @@ class BlockchainManager:
                 'nonce': block_data.get('nonce')
             }
         }
+
+    def _collect_transactions_for_addresses(self, block: Dict, normalized_map: Dict[str, str]) -> Dict[str, List[Dict]]:
+        """Collect transactions in a block for multiple addresses in one pass."""
+        results: Dict[str, List[Dict]] = {original: [] for original in normalized_map.values()}
+
+        # Mining reward via block metadata
+        miner_norm = self._normalize_address(block.get('miner', ''))
+        if miner_norm in normalized_map:
+            reward_amount = float(block.get('reward', 0) or 0)
+            if reward_amount > 0:
+                target_addr = normalized_map[miner_norm]
+                reward_tx = {
+                    'type': 'reward',
+                    'from': 'network',
+                    'to': target_addr,
+                    'amount': reward_amount,
+                    'block_height': block.get('index'),
+                    'timestamp': block.get('timestamp'),
+                    'hash': f"reward_{block.get('index')}_{block.get('hash', '')[:8]}",
+                    'status': 'confirmed',
+                    'description': f"Mining reward for block #{block.get('index')}",
+                    'direction': 'incoming',
+                    'effective_amount': reward_amount,
+                    'fee': 0
+                }
+                results[target_addr].append(reward_tx)
+
+        # Regular transactions
+        for tx_index, tx in enumerate(block.get('transactions', [])):
+            tx_type = (tx.get('type') or 'transfer').lower()
+            from_norm = self._normalize_address(tx.get('from') or tx.get('sender') or '')
+            to_norm = self._normalize_address(tx.get('to') or tx.get('receiver') or '')
+
+            # Explicit reward transaction
+            if tx_type == 'reward' and to_norm in normalized_map:
+                target_addr = normalized_map[to_norm]
+                amount = float(tx.get('amount', 0) or 0)
+                enhanced = tx.copy()
+                enhanced.update({
+                    'block_height': block.get('index'),
+                    'status': 'confirmed',
+                    'tx_index': tx_index,
+                    'direction': 'incoming',
+                    'effective_amount': amount,
+                    'fee': 0,
+                })
+                enhanced.setdefault('from', 'network')
+                results[target_addr].append(enhanced)
+                continue
+
+            # Incoming transfer
+            if to_norm in normalized_map:
+                target_addr = normalized_map[to_norm]
+                amount = float(tx.get('amount', 0) or 0)
+                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                enhanced = tx.copy()
+                enhanced.update({
+                    'block_height': block.get('index'),
+                    'status': 'confirmed',
+                    'tx_index': tx_index,
+                    'direction': 'incoming',
+                    'effective_amount': amount,
+                    'amount': amount,
+                    'fee': fee
+                })
+                results[target_addr].append(enhanced)
+
+            # Outgoing transfer
+            if from_norm in normalized_map:
+                target_addr = normalized_map[from_norm]
+                amount = float(tx.get('amount', 0) or 0)
+                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                enhanced = tx.copy()
+                enhanced.update({
+                    'block_height': block.get('index'),
+                    'status': 'confirmed',
+                    'tx_index': tx_index,
+                    'direction': 'outgoing',
+                    'effective_amount': -(amount + fee),
+                    'amount': amount,
+                    'fee': fee
+                })
+                results[target_addr].append(enhanced)
+
+        # Trim empty entries
+        return {addr: txs for addr, txs in results.items() if txs}
 
     def _find_address_transactions(self, block: Dict, address: str) -> List[Dict]:
         """Find transactions in block that involve the address - FIXED REWARD DETECTION"""
