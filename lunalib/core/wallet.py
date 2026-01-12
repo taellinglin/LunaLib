@@ -820,8 +820,12 @@ class LunaWallet:
                 'pending': [],
                 'reward_transactions': [],
                 'transfer_transactions': [],
+                'incoming_transfers': [],
+                'outgoing_transfers': [],
                 'total_rewards': 0,
-                'total_transfers': 0
+                'total_transfers': 0,
+                'total_incoming': 0,
+                'total_outgoing': 0
             }
         
         try:
@@ -845,26 +849,39 @@ class LunaWallet:
                 pending_txs = mempool.get_pending_transactions(address, fetch_remote=True)
                 self._pending_tx_cache[norm_addr] = pending_txs
             
-            # Separate rewards and transfers
+            # Separate rewards and transfers based on type and source
+            # Rewards: explicitly marked as reward/mining type, or from network
             reward_txs = [tx for tx in confirmed_txs 
-                         if tx.get('type', '').lower() in ['reward', 'mining'] 
+                         if tx.get('type', '').lower() in ['reward', 'mining', 'gtx_genesis'] 
                          or tx.get('from') == 'network']
+            
+            # Transfers: anything that's NOT a reward (includes both incoming and outgoing)
             transfer_txs = [tx for tx in confirmed_txs 
-                           if tx.get('type', '').lower() not in ['reward', 'mining'] 
+                           if tx.get('type', '').lower() not in ['reward', 'mining', 'gtx_genesis'] 
                            and tx.get('from') != 'network']
+            
+            # Separate incoming vs outgoing transfers
+            incoming_transfers = [tx for tx in transfer_txs if tx.get('direction') == 'incoming']
+            outgoing_transfers = [tx for tx in transfer_txs if tx.get('direction') == 'outgoing']
             
             result = {
                 'confirmed': confirmed_txs,
                 'pending': pending_txs,
                 'reward_transactions': reward_txs,
                 'transfer_transactions': transfer_txs,
+                'incoming_transfers': incoming_transfers,
+                'outgoing_transfers': outgoing_transfers,
                 'total_rewards': len(reward_txs),
-                'total_transfers': len(transfer_txs)
+                'total_transfers': len(transfer_txs),
+                'total_incoming': len(incoming_transfers),
+                'total_outgoing': len(outgoing_transfers)
             }
             
             print(f"DEBUG: get_wallet_transactions({address}):")
             print(f"  - Mining Rewards: {len(reward_txs)}")
-            print(f"  - Transfers: {len(transfer_txs)}")
+            print(f"  - Incoming Transfers: {len(incoming_transfers)}")
+            print(f"  - Outgoing Transfers: {len(outgoing_transfers)}")
+            print(f"  - Total Transfers: {len(transfer_txs)}")
             print(f"  - Pending: {len(pending_txs)}")
             print(f"  - Total Confirmed: {len(confirmed_txs)}")
             
@@ -879,8 +896,12 @@ class LunaWallet:
                 'pending': [],
                 'reward_transactions': [],
                 'transfer_transactions': [],
+                'incoming_transfers': [],
+                'outgoing_transfers': [],
                 'total_rewards': 0,
-                'total_transfers': 0
+                'total_transfers': 0,
+                'total_incoming': 0,
+                'total_outgoing': 0
             }
     
     # ============================================================================
@@ -988,6 +1009,182 @@ class LunaWallet:
             'is_locked': self.is_locked,
             'crypto_standard': 'SM2_GB/T_32918'
         }
+    
+    # ============================================================================
+    # UNIFIED WALLET STATE MANAGER INTEGRATION
+    # ============================================================================
+    
+    def sync_with_state_manager(self, blockchain=None, mempool=None) -> Dict:
+        """
+        Sync all registered wallets with the unified WalletStateManager.
+        Scans blockchain once and merges mempool data for all wallets.
+        
+        Parameters:
+            blockchain: BlockchainManager instance (required)
+            mempool: MempoolManager instance (required)
+        
+        Returns: Dictionary of wallet summaries with balances and transactions
+        """
+        try:
+            if not blockchain or not mempool:
+                print("❌ blockchain and mempool instances required")
+                return {}
+            
+            from .wallet_manager import get_wallet_manager
+            
+            state_manager = get_wallet_manager()
+            
+            # Register all wallets with state manager if not already done
+            addresses = list(self.wallets.keys())
+            state_manager.register_wallets(addresses)
+            
+            print(f"🔄 Syncing {len(addresses)} wallets...")
+            
+            # Get data from blockchain and mempool (single scan)
+            blockchain_txs = blockchain.scan_transactions_for_addresses(addresses)
+            mempool_txs = mempool.get_pending_transactions_for_addresses(addresses)
+            
+            # Sync state manager with the data
+            state_manager.sync_wallets_from_sources(blockchain_txs, mempool_txs)
+            
+            # Update LunaWallet balances from state manager
+            balances = state_manager.get_all_balances()
+            for address, balance_data in balances.items():
+                if address in self.wallets:
+                    self.wallets[address]['balance'] = balance_data['confirmed_balance']
+                    self.wallets[address]['available_balance'] = balance_data['available_balance']
+            
+            # Update current wallet
+            if self.current_wallet_address and self.current_wallet_address in balances:
+                balance_data = balances[self.current_wallet_address]
+                self.balance = balance_data['confirmed_balance']
+                self.available_balance = balance_data['available_balance']
+            
+            # Return summaries
+            summaries = state_manager.get_all_summaries()
+            print(f"✅ Sync complete - {len(summaries)} wallets updated")
+            
+            return summaries
+            
+        except Exception as e:
+            print(f"❌ Sync error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+    
+    def get_wallet_details(self, address: str = None) -> Optional[Dict]:
+        """
+        Get detailed information for a wallet including balance and transaction summary.
+        If address is None, uses current wallet.
+        """
+        if address is None:
+            address = self.current_wallet_address
+        
+        if not address:
+            return None
+        
+        try:
+            from .wallet_manager import get_wallet_manager
+            state_manager = get_wallet_manager()
+            
+            summary = state_manager.get_wallet_summary(address)
+            if summary:
+                return summary
+            
+            # Fallback to basic wallet info
+            if address in self.wallets:
+                wallet_data = self.wallets[address]
+                return {
+                    'address': address,
+                    'label': wallet_data.get('label', 'Wallet'),
+                    'balance': wallet_data.get('balance', 0.0),
+                    'available_balance': wallet_data.get('available_balance', 0.0),
+                    'is_locked': wallet_data.get('is_locked', True),
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"⚠️  Error getting wallet details: {e}")
+            return None
+    
+    def get_wallet_transactions(self, address: str = None, tx_type: str = 'all') -> List[Dict]:
+        """
+        Get transactions for a wallet from the state manager.
+        
+        tx_type: 'all', 'confirmed', 'pending', 'transfers', 'rewards', 'genesis'
+        """
+        if address is None:
+            address = self.current_wallet_address
+        
+        if not address:
+            return []
+        
+        try:
+            from .wallet_manager import get_wallet_manager
+            state_manager = get_wallet_manager()
+            
+            return state_manager.get_transactions(address, tx_type)
+            
+        except Exception as e:
+            print(f"⚠️  Error getting transactions: {e}")
+            return []
+    
+    def register_wallet_ui_callback(self, callback: Callable) -> None:
+        """
+        Register a callback to receive real-time wallet balance updates.
+        Callback will be called with: callback(balance_data_dict)
+        """
+        try:
+            from .wallet_manager import get_wallet_manager
+            state_manager = get_wallet_manager()
+            state_manager.on_balance_update(callback)
+        except Exception as e:
+            print(f"⚠️  Error registering callback: {e}")
+    
+    def start_continuous_sync(self, blockchain=None, mempool=None, poll_interval: int = 30) -> None:
+        """
+        Start continuous synchronization in background thread.
+        Syncs every poll_interval seconds.
+        """
+        if not blockchain or not mempool:
+            print("❌ blockchain and mempool instances required")
+            return
+        
+        try:
+            from .wallet_manager import get_wallet_manager
+            from .wallet_sync_helper import WalletSyncHelper
+            
+            state_manager = get_wallet_manager()
+            
+            # Register wallets
+            addresses = list(self.wallets.keys())
+            state_manager.register_wallets(addresses)
+            
+            def sync_callback(balance_data):
+                """Update LunaWallet when state manager updates"""
+                for address, balance_info in balance_data.items():
+                    if address in self.wallets:
+                        self.wallets[address]['balance'] = balance_info['confirmed_balance']
+                        self.wallets[address]['available_balance'] = balance_info['available_balance']
+                    
+                    if address == self.current_wallet_address:
+                        self.balance = balance_info['confirmed_balance']
+                        self.available_balance = balance_info['available_balance']
+            
+            # Create sync helper
+            sync_helper = WalletSyncHelper(self, blockchain, mempool)
+            
+            # Start continuous sync with callback
+            sync_helper.start_continuous_sync(
+                poll_interval,
+                on_balance_update=sync_callback
+            )
+            
+            print(f"🔄 Started continuous sync (interval: {poll_interval}s)")
+            
+        except Exception as e:
+            print(f"❌ Error starting continuous sync: {e}")
     
     def save_to_file(self, filename=None):
         """Save wallet to file"""

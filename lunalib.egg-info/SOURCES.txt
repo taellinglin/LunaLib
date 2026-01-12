@@ -24,6 +24,8 @@ lunalib/core/crypto.py
 lunalib/core/mempool.py
 lunalib/core/sm2.py
 lunalib/core/wallet.py
+lunalib/core/wallet_manager.py
+lunalib/core/wallet_sync_helper.py
 lunalib/gtx/__init__.py
 lunalib/gtx/bill_registry.py
 lunalib/gtx/digital_bill.py

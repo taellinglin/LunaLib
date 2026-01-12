@@ -268,6 +268,8 @@ class BlockchainManager:
         """Scan blockchain for transactions involving an address"""
         if end_height is None:
             end_height = self.get_blockchain_height()
+        
+        print(f"[SCAN] Scanning transactions for {address} from block {start_height} to {end_height}")
             
         transactions = []
         
@@ -275,12 +277,14 @@ class BlockchainManager:
         batch_size = 100
         for batch_start in range(start_height, end_height + 1, batch_size):
             batch_end = min(batch_start + batch_size - 1, end_height)
+            print(f"[SCAN] Processing batch {batch_start}-{batch_end}...")
             blocks = self.get_blocks_range(batch_start, batch_end)
             
             for block in blocks:
                 block_transactions = self._find_address_transactions(block, address)
                 transactions.extend(block_transactions)
-                
+        
+        print(f"[SCAN] Found {len(transactions)} total transactions for {address}")
         return transactions
 
     def scan_transactions_for_addresses(self, addresses: List[str], start_height: int = 0, end_height: int = None) -> Dict[str, List[Dict]]:
@@ -294,6 +298,8 @@ class BlockchainManager:
         if end_height < start_height:
             return {addr: [] for addr in addresses}
 
+        print(f"[MULTI-SCAN] Scanning {len(addresses)} addresses from block {start_height} to {end_height}")
+
         # Map normalized address -> original address for quick lookup
         normalized_map = {}
         for addr in addresses:
@@ -306,6 +312,7 @@ class BlockchainManager:
         batch_size = 100
         for batch_start in range(start_height, end_height + 1, batch_size):
             batch_end = min(batch_start + batch_size - 1, end_height)
+            print(f"[MULTI-SCAN] Processing batch {batch_start}-{batch_end}...")
             blocks = self.get_blocks_range(batch_start, batch_end)
 
             for block in blocks:
@@ -313,6 +320,12 @@ class BlockchainManager:
                 for original_addr, txs in collected.items():
                     if txs:
                         results[original_addr].extend(txs)
+
+        # Summary
+        total_txs = sum(len(txs) for txs in results.values())
+        print(f"[MULTI-SCAN] Found {total_txs} total transactions")
+        for addr in addresses:
+            print(f"  - {addr}: {len(results[addr])} transactions")
 
         return results
 
