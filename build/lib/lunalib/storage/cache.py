@@ -1,4 +1,13 @@
 import os
+import sys
+
+# --- Unicode-safe print for Windows console ---
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', 'utf-8')
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import sqlite3
 import pickle
 import gzip
@@ -66,7 +75,7 @@ class BlockchainCache:
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"Cache save error: {e}")
+            safe_print(f"Cache save error: {e}")
     
     def get_block(self, height: int) -> Optional[Dict]:
         """Get block from cache"""
@@ -88,7 +97,7 @@ class BlockchainCache:
                 
             conn.close()
         except Exception as e:
-            print(f"Cache read error: {e}")
+            safe_print(f"Cache read error: {e}")
             
         return None
     
@@ -116,7 +125,7 @@ class BlockchainCache:
                     continue
                     
         except Exception as e:
-            print(f"Block range cache error: {e}")
+            safe_print(f"Block range cache error: {e}")
             
         return blocks
     
@@ -145,4 +154,4 @@ class BlockchainCache:
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"Cache cleanup error: {e}")
+            safe_print(f"Cache cleanup error: {e}")

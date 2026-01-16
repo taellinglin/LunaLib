@@ -111,11 +111,10 @@ class WalletStateManager:
         self.state_lock = threading.RLock()
         self.balance_callbacks: List[Callable] = []
         self.transaction_callbacks: List[Callable] = []
-        
+        from lunalib.utils.console import print_info, print_success
         # Cache for pending transactions to avoid duplicate processing
         self.processed_pending_hashes: Set[str] = set()
         self.processed_confirmed_hashes: Set[str] = set()
-        
         # Sync control
         self.last_sync_time = 0
         self.sync_in_progress = False
@@ -145,7 +144,7 @@ class WalletStateManager:
         with self.state_lock:
             if address not in self.wallet_states:
                 self.wallet_states[address] = WalletState(address=address)
-                print(f"📱 Registered wallet: {address}")
+                print_success(f"📱 Registered wallet: {address}")
             return self.wallet_states[address]
     
     def register_wallets(self, addresses: List[str]) -> Dict[str, WalletState]:
@@ -374,7 +373,7 @@ class WalletStateManager:
         """
         
         with self.state_lock:
-            print(f"\n🔄 Syncing wallets...")
+            print_info(f"\n🔄 Syncing wallets...")
             sync_start = time.time()
             
             # Process blockchain transactions
@@ -437,7 +436,7 @@ class WalletStateManager:
                 state.last_updated = time.time()
             
             sync_time = time.time() - sync_start
-            print(f"✅ Sync complete in {sync_time:.2f}s")
+            print_success(f"✅ Sync complete in {sync_time:.2f}s")
             
             # Trigger callbacks
             self._trigger_balance_updates()
@@ -471,7 +470,7 @@ class WalletStateManager:
         
         thread = threading.Thread(target=sync_loop, daemon=True)
         thread.start()
-        print(f"🔄 Started background sync thread (interval: {poll_interval}s)")
+        print_info(f"🔄 Started background sync thread (interval: {poll_interval}s)")
     
     # =========================================================================
     # Callbacks for UI updates

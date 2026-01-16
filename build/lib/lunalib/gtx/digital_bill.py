@@ -1,3 +1,11 @@
+import sys
+def safe_print(*args, **kwargs):
+    encoding = sys.stdout.encoding or 'utf-8'
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
+safe_print("Warning: cryptography library not available. Using fallback methods.")
 import time
 import hashlib
 import secrets
@@ -12,7 +20,7 @@ try:
     from cryptography.exceptions import InvalidSignature
     CRYPTOGRAPHY_AVAILABLE = True
 except ImportError:
-    print("Warning: cryptography library not available. Using fallback methods.")
+    safe_print("Warning: cryptography library not available. Using fallback methods.")
     CRYPTOGRAPHY_AVAILABLE = False
 
 from .bill_registry import BillRegistry
@@ -182,7 +190,7 @@ class DigitalBill:
             
             return self.signature
         except Exception as e:
-            print(f"Cryptographic signing failed, using fallback: {e}")
+            safe_print(f"Cryptographic signing failed, using fallback: {e}")
             return self._sign_fallback(private_key)
     
     def _sign_fallback(self, private_key):

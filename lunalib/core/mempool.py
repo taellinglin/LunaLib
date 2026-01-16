@@ -211,6 +211,7 @@ class MempoolManager:
             to_norm = self._normalize_address(tx.get('to') or tx.get('receiver'))
             if target_norm and (from_norm == target_norm or to_norm == target_norm):
                 transactions.append(tx)
+        print(f"[MEMPOOL] get_pending_transactions for {address}: {len(transactions)} txs returned")
         return transactions
 
     def get_pending_transactions_for_addresses(self, addresses: List[str], fetch_remote: bool = True) -> Dict[str, List[Dict]]:

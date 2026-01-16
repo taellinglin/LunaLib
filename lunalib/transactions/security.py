@@ -1,4 +1,18 @@
 import time
+import sys
+from lunalib.utils.console import print_info, print_warn, print_error, print_success, print_debug
+
+# --- Unicode-safe print for Windows console ---
+def safe_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if "ERROR" in msg:
+        print_error(msg)
+    elif "WARNING" in msg:
+        print_warn(msg)
+    elif "DEBUG" in msg:
+        print_debug(msg)
+    else:
+        print_info(msg)
 import hashlib
 from typing import Dict, Tuple
 
@@ -17,11 +31,11 @@ class TransactionSecurity:
             from ..core.crypto import KeyManager as SM2KeyManager
             self.key_manager = SM2KeyManager()
             self.sm2_available = True
-            print("[SECURITY] SM2 KeyManager loaded successfully")
+            safe_print("[SECURITY] SM2 KeyManager loaded successfully")
         except ImportError as e:
             self.key_manager = None
             self.sm2_available = False
-            print(f"[SECURITY] SM2 KeyManager not available: {e}")
+            safe_print(f"[SECURITY] SM2 KeyManager not available: {e}")
     
     def validate_transaction_security(self, transaction: Dict) -> Tuple[bool, str]:
         """Comprehensive transaction security validation with SM2"""
@@ -114,22 +128,22 @@ class TransactionSecurity:
             
             # For unsigned test transactions
             if signature in ["system", "unsigned", "test"]:
-                print(f"[SECURITY] Skipping signature check for system/unsigned transaction")
+                safe_print(f"[SECURITY] Skipping signature check for system/unsigned transaction")
                 return True
             
             # Check SM2 signature length (should be 128 hex chars = 64 bytes)
             if len(signature) != 128:
-                print(f"[SECURITY] Invalid SM2 signature length: {len(signature)} (expected 128)")
+                safe_print(f"[SECURITY] Invalid SM2 signature length: {len(signature)} (expected 128)")
                 return False
             
             # Check if all characters are valid hex
             if not all(c in "0123456789abcdefABCDEF" for c in signature):
-                print(f"[SECURITY] Signature contains non-hex characters")
+                safe_print(f"[SECURITY] Signature contains non-hex characters")
                 return False
             
             # Check public key format (should start with '04' for uncompressed)
             if not public_key.startswith('04'):
-                print(f"[SECURITY] Invalid public key format: {public_key[:20]}...")
+                safe_print(f"[SECURITY] Invalid public key format: {public_key[:20]}...")
                 return False
             
             # Use KeyManager for verification if available
@@ -139,15 +153,15 @@ class TransactionSecurity:
                 
                 # Verify signature
                 is_valid = self.key_manager.verify_signature(signing_data, signature, public_key)
-                print(f"[SECURITY] SM2 signature verification: {is_valid}")
+                safe_print(f"[SECURITY] SM2 signature verification: {is_valid}")
                 return is_valid
             
             # Fallback: Basic format check if SM2 not available
-            print(f"[SECURITY] SM2 not available, using basic signature validation")
+            safe_print(f"[SECURITY] SM2 not available, using basic signature validation")
             return len(signature) == 128 and signature.startswith(('04', '03', '02'))
             
         except Exception as e:
-            print(f"[SECURITY] Signature validation error: {e}")
+            safe_print(f"[SECURITY] Signature validation error: {e}")
             return False
     
     def _get_signing_data(self, transaction: Dict) -> str:
@@ -174,7 +188,7 @@ class TransactionSecurity:
     
     def _validate_signature(self, transaction: Dict) -> bool:
         """Legacy signature validation (for backward compatibility)"""
-        print(f"[SECURITY] Using legacy signature validation")
+        safe_print(f"[SECURITY] Using legacy signature validation")
         return self._validate_signature_sm2(transaction)
     
     def _check_rate_limit(self, address: str) -> bool:

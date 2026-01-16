@@ -29,16 +29,20 @@ class TransactionValidator:
         return True, message
     
     def validate_transaction_batch(self, transactions: List[Dict]) -> Tuple[bool, List[str]]:
-        """Validate multiple transactions"""
+        """Validate multiple transactions with tqdm progress bar"""
+        from tqdm import tqdm
+        from lunalib.utils.console import print_info, print_error
         results = []
         all_valid = True
-        
-        for tx in transactions:
+        for tx in tqdm(transactions, desc="Validating transactions", ncols=80):
             is_valid, message = self.validate_transaction(tx)
+            if is_valid:
+                print_info(message)
+            else:
+                print_error(message)
             results.append(message)
             if not is_valid:
                 all_valid = False
-        
         return all_valid, results
     
     def verify_transaction_inclusion(self, transaction_hash: str, block_height: int) -> bool:

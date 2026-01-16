@@ -1,3 +1,10 @@
+import sys
+def safe_print(*args, **kwargs):
+    encoding = sys.stdout.encoding or 'utf-8'
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import pytest
 import os
 import json
@@ -56,13 +63,13 @@ class TestLunaWallet:
 
         # Create first wallet
         wallet1_data = wallet.create_wallet("Wallet 1", "pass1")
-        print(f"Wallet 1 address: {wallet1_data['address']}")
+        safe_print(f"Wallet 1 address: {wallet1_data['address']}")
 
         # Create second wallet (adds to collection without switching current)
         wallet2_data = wallet.create_new_wallet("Wallet 2", "pass2")
-        print(f"Wallet 2 address: {wallet2_data['address']}")
+        safe_print(f"Wallet 2 address: {wallet2_data['address']}")
 
-        print(f"All wallets: {list(wallet.wallets.keys())}")
+        safe_print(f"All wallets: {list(wallet.wallets.keys())}")
         
         assert len(wallet.wallets) == 2
 

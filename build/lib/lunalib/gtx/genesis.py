@@ -48,7 +48,7 @@ class GTXGenesis:
                 return {'valid': False, 'error': 'Bill not found in registry'}
             
             # DEBUG: Print what we received
-            print(f"DEBUG: Full bill record: {bill_record}")
+            safe_print(f"DEBUG: Full bill record: {bill_record}")
             
             # Extract the actual bill_data from the metadata field
             bill_data = bill_record.get('metadata', {})
@@ -56,7 +56,7 @@ class GTXGenesis:
                 return {'valid': False, 'error': 'No bill data found in metadata'}
             
             # DEBUG: Print the extracted bill_data
-            print(f"DEBUG: Extracted bill_data: {bill_data}")
+            safe_print(f"DEBUG: Extracted bill_data: {bill_data}")
             
             # Extract signature components from bill_data (not from bill_record)
             public_key = bill_data.get('public_key')
@@ -68,10 +68,10 @@ class GTXGenesis:
             timestamp = bill_data.get('timestamp', 0)
             bill_type = bill_data.get('type', 'GTX_Genesis')
             
-            print(f"🔍 GTXGenesis.verify_bill() for {front_serial}:")
-            print(f"   Signature: {signature}")
-            print(f"   Public Key: {public_key}")
-            print(f"   Metadata Hash: {metadata_hash}")
+            safe_print(f"🔍 GTXGenesis.verify_bill() for {front_serial}:")
+            safe_print(f"   Signature: {signature}")
+            safe_print(f"   Public Key: {public_key}")
+            safe_print(f"   Metadata Hash: {metadata_hash}")
             
             # Use the same verification logic as the endpoint
             verification_method = "unknown"
@@ -81,7 +81,7 @@ class GTXGenesis:
             if metadata_hash and signature == metadata_hash:
                 signature_valid = True
                 verification_method = "signature_is_metadata_hash"
-                print(f"✅ Verified: signature matches metadata_hash")
+                safe_print(f"✅ Verified: signature matches metadata_hash")
             
             # METHOD 2: Check hash of public_key + metadata_hash
             elif signature_valid is None and metadata_hash and public_key and signature:
@@ -90,7 +90,7 @@ class GTXGenesis:
                 if signature == expected_signature:
                     signature_valid = True
                     verification_method = "metadata_hash_signature"
-                    print(f"✅ Verified: hash(public_key + metadata_hash)")
+                    safe_print(f"Verified: hash(public_key + metadata_hash)")
             
             # METHOD 3: Check DigitalBill calculated hash
             elif signature_valid is None:
@@ -122,32 +122,31 @@ class GTXGenesis:
                     if signature == calculated_hash:
                         signature_valid = True
                         verification_method = "digital_bill_calculate_hash"
-                        print(f"✅ Verified: DigitalBill.calculate_hash()")
+                        safe_print(f"Verified: DigitalBill.calculate_hash()")
                         print(f"   Calculated hash: {calculated_hash}")
                     
                     # Approach 2: Use the verify() method (checks all signature types)
                     elif digital_bill.verify():
                         signature_valid = True
                         verification_method = "digital_bill_verify_method"
-                        print(f"✅ Verified: DigitalBill.verify()")
+                        safe_print(f"Verified: DigitalBill.verify()")
                     
                     # Approach 3: Check if signature matches metadata_hash generation
                     elif signature == digital_bill._generate_metadata_hash():
                         signature_valid = True
                         verification_method = "digital_bill_metadata_hash"
-                        print(f"✅ Verified: matches generated metadata_hash")
+                        safe_print(f"Verified: matches generated metadata_hash")
                     
                     else:
-                        print(f"❌ DigitalBill verification failed:")
-                        print(f"   Calculated hash: {calculated_hash}")
-                        print(f"   Signature: {signature}")
-                        print(f"   Metadata hash: {metadata_hash}")
-                        print(f"   Public key: {public_key}")
-                        
+                        safe_print(f"DigitalBill verification failed:")
+                        safe_print(f"   Calculated hash: {calculated_hash}")
+                        safe_print(f"   Signature: {signature}")
+                        safe_print(f"   Metadata hash: {metadata_hash}")
+                        safe_print(f"   Public key: {public_key}")
                 except Exception as e:
-                    print(f"DigitalBill verification error: {e}")
+                    safe_print(f"DigitalBill verification error: {e}")
                     import traceback
-                    print(f"Traceback: {traceback.format_exc()}")
+                    safe_print(f"Traceback: {traceback.format_exc()}")
             
             # METHOD 4: Check simple concatenation hash
             elif signature_valid is None and signature:
@@ -156,7 +155,7 @@ class GTXGenesis:
                 if signature == expected_simple_hash:
                     signature_valid = True
                     verification_method = "simple_hash"
-                    print(f"✅ Verified: hash(serial+denom+issued+timestamp)")
+                    safe_print(f"✅ Verified: hash(serial+denom+issued+timestamp)")
             
             # METHOD 5: Check bill JSON hash
             elif signature_valid is None:
@@ -173,19 +172,19 @@ class GTXGenesis:
                 if signature == bill_json_hash:
                     signature_valid = True
                     verification_method = "bill_json_hash"
-                    print(f"✅ Verified: hash(bill_data_json)")
+                    safe_print(f"Verified: hash(bill_data_json)")
             
             # Final fallback: accept any non-empty signature temporarily
             if signature_valid is None and signature and len(signature) > 10:
                 signature_valid = True
                 verification_method = "fallback_accept"
-                print(f"⚠️  Using fallback acceptance for signature")
+                safe_print(f"Using fallback acceptance for signature")
             
             # If all methods failed
             if signature_valid is None:
                 signature_valid = False
                 verification_method = "all_failed"
-                print(f"❌ All verification methods failed")
+                safe_print(f"All verification methods failed")
             
             # Return result in same format as endpoint
             if signature_valid:
@@ -337,7 +336,7 @@ class GTXGenesis:
             return computed_hash == bill_info['hash']
             
         except Exception as e:
-            print(f"Bill verification error: {e}")
+            safe_print(f"Bill verification error: {e}")
             return False
     
     def _get_denomination_breakdown(self, bills: List[Dict]) -> Dict[int, int]:

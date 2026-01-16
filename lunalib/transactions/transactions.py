@@ -1,5 +1,19 @@
-# lunalib/transactions/transactions.py
 import time
+import sys
+from lunalib.utils.console import print_info, print_warn, print_error, print_success, print_debug
+
+# --- Unicode-safe print for Windows console ---
+def safe_print(*args, **kwargs):
+    # 既存のsafe_print呼び出しを用途別に色分けprintへ置換するためのラッパー
+    msg = " ".join(str(a) for a in args)
+    if "ERROR" in msg:
+        print_error(msg)
+    elif "WARNING" in msg:
+        print_warn(msg)
+    elif "DEBUG" in msg:
+        print_debug(msg)
+    else:
+        print_info(msg)
 import hashlib
 import json
 from typing import Dict, Optional, Tuple, List
@@ -9,10 +23,10 @@ from ..core.mempool import MempoolManager
 try:
     from ..core.crypto import KeyManager as SM2KeyManager
     SM2_AVAILABLE = True
-    print("DEBUG: Using SM2 KeyManager from crypto module")
+    safe_print("DEBUG: Using SM2 KeyManager from crypto module")
 except ImportError as e:
     SM2_AVAILABLE = False
-    print(f"WARNING: SM2 KeyManager not available: {e}")
+    safe_print(f"WARNING: SM2 KeyManager not available: {e}")
 
 class TransactionSecurity:
     """Transaction security validation and risk assessment"""
@@ -71,7 +85,7 @@ class TransactionManager:
         if SM2_AVAILABLE:
             self.key_manager = SM2KeyManager()
         else:
-            print("ERROR: SM2 KeyManager not available - cannot sign transactions")
+            safe_print("ERROR: SM2 KeyManager not available - cannot sign transactions")
             self.key_manager = None
     
     def create_transaction(self, from_address: str, to_address: str, amount: float, 
@@ -99,33 +113,33 @@ class TransactionManager:
                 # Sign the transaction data
                 tx_string = self._get_signing_data(transaction)
                 
-                print(f"[TRANSACTIONS CREATE DEBUG] Signing data: {tx_string}")
-                print(f"[TRANSACTIONS CREATE DEBUG] Private key available: {bool(private_key)}")
-                print(f"[TRANSACTIONS CREATE DEBUG] Private key length: {len(private_key)}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Signing data: {tx_string}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Private key available: {bool(private_key)}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Private key length: {len(private_key)}")
                 
                 signature = self.key_manager.sign_data(tx_string, private_key)
                 
                 # Get public key from private key
                 public_key = self.key_manager.derive_public_key(private_key)
                 
-                print(f"[TRANSACTIONS CREATE DEBUG] Generated signature: {signature}")
-                print(f"[TRANSACTIONS CREATE DEBUG] Generated public key: {public_key}")
-                print(f"[TRANSACTIONS CREATE DEBUG] Signature length: {len(signature)}")
-                print(f"[TRANSACTIONS CREATE DEBUG] Public key length: {len(public_key)}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Generated signature: {signature}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Generated public key: {public_key}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Signature length: {len(signature)}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Public key length: {len(public_key)}")
                 
                 transaction["signature"] = signature
                 transaction["public_key"] = public_key
                 
                 # Immediately test verification
                 test_verify = self.key_manager.verify_signature(tx_string, signature, public_key)
-                print(f"[TRANSACTIONS CREATE DEBUG] Immediate self-verification: {test_verify}")
+                safe_print(f"[TRANSACTIONS CREATE DEBUG] Immediate self-verification: {test_verify}")
                 
                 if not test_verify:
-                    print(f"[TRANSACTIONS CREATE ERROR] Signature doesn't verify immediately!")
-                    print(f"[TRANSACTIONS CREATE ERROR] This suggests an SM2 implementation issue")
+                    safe_print(f"[TRANSACTIONS CREATE ERROR] Signature doesn't verify immediately!")
+                    safe_print(f"[TRANSACTIONS CREATE ERROR] This suggests an SM2 implementation issue")
                     
             except Exception as e:
-                print(f"[TRANSACTIONS CREATE ERROR] Signing failed: {e}")
+                safe_print(f"[TRANSACTIONS CREATE ERROR] Signing failed: {e}")
                 import traceback
                 traceback.print_exc()
                 transaction["signature"] = "unsigned"
@@ -226,55 +240,55 @@ class TransactionManager:
             
             # System transactions are always valid
             if signature in ["system", "unsigned", "test"]:
-                print(f"[TRANSACTIONS] Skipping signature check for {signature} transaction")
+                safe_print(f"[TRANSACTIONS] Skipping signature check for {signature} transaction")
                 return True
             
             if not self.key_manager:
-                print("[TRANSACTIONS] No key manager available for verification")
+                safe_print("[TRANSACTIONS] No key manager available for verification")
                 return False
             
             # Check SM2 signature format
             if len(signature) != 128:
-                print(f"[TRANSACTIONS] Invalid SM2 signature length: {len(signature)} (expected 128)")
+                safe_print(f"[TRANSACTIONS] Invalid SM2 signature length: {len(signature)} (expected 128)")
                 return False
             
             # Get signing data (without public_key!)
             sign_data = self._get_signing_data(transaction)
             public_key = transaction.get("public_key", "")
             
-            print(f"[TRANSACTIONS VERIFY] Signing data length: {len(sign_data)}")
-            print(f"[TRANSACTIONS VERIFY] Signing data (first 100 chars): {sign_data[:100]}")
+            safe_print(f"[TRANSACTIONS VERIFY] Signing data length: {len(sign_data)}")
+            safe_print(f"[TRANSACTIONS VERIFY] Signing data (first 100 chars): {sign_data[:100]}")
             
             # Try to verify with KeyManager
-            print(f"[TRANSACTIONS] Attempting verification...")
+            safe_print(f"[TRANSACTIONS] Attempting verification...")
             is_valid = self.key_manager.verify_signature(sign_data, signature, public_key)
             
-            print(f"[TRANSACTIONS] SM2 signature verification result: {is_valid}")
+            safe_print(f"[TRANSACTIONS] SM2 signature verification result: {is_valid}")
             
             return is_valid
             
         except Exception as e:
-            print(f"[TRANSACTIONS] Verification error: {e}")
+            safe_print(f"[TRANSACTIONS] Verification error: {e}")
             import traceback
             traceback.print_exc()
             return False
     def _debug_signature_issue(self, transaction: Dict, sign_data: str, signature: str, public_key: str):
         """Debug why signature verification is failing"""
-        print("\n" + "="*60)
-        print("DEBUGGING SIGNATURE ISSUE")
-        print("="*60)
+        safe_print("\n" + "="*60)
+        safe_print("DEBUGGING SIGNATURE ISSUE")
+        safe_print("="*60)
         
         # 1. Check if we can sign and verify a simple test
-        print("\n1. Testing SM2 with simple message...")
+        safe_print("\n1. Testing SM2 with simple message...")
         test_message = "Simple test message"
         test_private = self.key_manager.generate_private_key()
         test_public = self.key_manager.derive_public_key(test_private)
         test_sig = self.key_manager.sign_data(test_message, test_private)
         test_valid = self.key_manager.verify_signature(test_message, test_sig, test_public)
-        print(f"   Simple test verification: {test_valid}")
+        safe_print(f"   Simple test verification: {test_valid}")
         
         # 2. Try to recreate what was signed during transaction creation
-        print("\n2. Reconstructing original transaction data...")
+        safe_print("\n2. Reconstructing original transaction data...")
         # Create the exact transaction data that should have been signed
         reconstructed = {
             "amount": float(transaction["amount"]),
@@ -289,23 +303,23 @@ class TransactionManager:
         
         import json
         reconstructed_json = json.dumps(reconstructed, sort_keys=True)
-        print(f"   Reconstructed JSON: {reconstructed_json}")
-        print(f"   Current signing data: {sign_data}")
-        print(f"   Are they equal? {reconstructed_json == sign_data}")
-        print(f"   Length difference: {len(reconstructed_json)} vs {len(sign_data)}")
+        safe_print(f"   Reconstructed JSON: {reconstructed_json}")
+        safe_print(f"   Current signing data: {sign_data}")
+        safe_print(f"   Are they equal? {reconstructed_json == sign_data}")
+        safe_print(f"   Length difference: {len(reconstructed_json)} vs {len(sign_data)}")
         
         # 3. Check for whitespace differences
-        print("\n3. Checking for whitespace differences...")
-        print(f"   Reconstructed has spaces: {' ' in reconstructed_json}")
-        print(f"   Sign data has spaces: {' ' in sign_data}")
+        safe_print("\n3. Checking for whitespace differences...")
+        safe_print(f"   Reconstructed has spaces: {' ' in reconstructed_json}")
+        safe_print(f"   Sign data has spaces: {' ' in sign_data}")
         
         # 4. Check float formatting
-        print("\n4. Checking float formatting...")
-        print(f"   Amount in tx: {transaction['amount']} (type: {type(transaction['amount'])})")
-        print(f"   Amount in reconstructed: {reconstructed['amount']} (type: {type(reconstructed['amount'])})")
+        safe_print("\n4. Checking float formatting...")
+        safe_print(f"   Amount in tx: {transaction['amount']} (type: {type(transaction['amount'])})")
+        safe_print(f"   Amount in reconstructed: {reconstructed['amount']} (type: {type(reconstructed['amount'])})")
         
         # 5. Try different JSON serialization options
-        print("\n5. Trying different JSON formats...")
+        safe_print("\n5. Trying different JSON formats...")
         formats = [
             ("Compact", lambda x: json.dumps(x, sort_keys=True, separators=(',', ':'))),
             ("Default", lambda x: json.dumps(x, sort_keys=True)),
@@ -315,9 +329,9 @@ class TransactionManager:
         for name, formatter in formats:
             formatted = formatter(reconstructed)
             is_valid_test = self.key_manager.verify_signature(formatted, signature, public_key)
-            print(f"   {name} format: {is_valid_test} (length: {len(formatted)})")
+            safe_print(f"   {name} format: {is_valid_test} (length: {len(formatted)})")
         
-        print("="*60 + "\n")
+        safe_print("="*60 + "\n")
     def assess_transaction_risk(self, transaction: Dict) -> Tuple[str, str]:
         """Assess transaction risk level"""
         return self.security.assess_risk(transaction)

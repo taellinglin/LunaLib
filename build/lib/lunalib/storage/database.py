@@ -3,6 +3,15 @@ import sqlite3
 import json
 import time
 from typing import Dict, List, Optional, Any
+import sys
+
+# --- Unicode-safe print for Windows console ---
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', 'utf-8')
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 
 class WalletDatabase:
     """Manages wallet data storage"""
@@ -96,7 +105,7 @@ class WalletDatabase:
             return True
             
         except Exception as e:
-            print(f"Save wallet error: {e}")
+            safe_print(f"Save wallet error: {e}")
             return False
     
     def load_wallet(self, address: str) -> Optional[Dict]:
@@ -122,7 +131,7 @@ class WalletDatabase:
                 }
                 
         except Exception as e:
-            print(f"Load wallet error: {e}")
+            safe_print(f"Load wallet error: {e}")
             
         return None
     
@@ -157,7 +166,7 @@ class WalletDatabase:
             return True
             
         except Exception as e:
-            print(f"Save transaction error: {e}")
+            safe_print(f"Save transaction error: {e}")
             return False
     
     def get_wallet_transactions(self, wallet_address: str, limit: int = 100) -> List[Dict]:
@@ -187,7 +196,7 @@ class WalletDatabase:
             return transactions
             
         except Exception as e:
-            print(f"Get transactions error: {e}")
+            safe_print(f"Get transactions error: {e}")
             return []
     
     def save_pending_transaction(self, transaction: Dict, wallet_address: str) -> bool:
@@ -218,5 +227,5 @@ class WalletDatabase:
             return True
             
         except Exception as e:
-            print(f"Save pending transaction error: {e}")
+            safe_print(f"Save pending transaction error: {e}")
             return False

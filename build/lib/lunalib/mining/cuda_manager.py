@@ -47,7 +47,7 @@ class CUDAManager:
             self.cuda_available = False
     
     def cuda_mine_batch(self, mining_data: Dict, difficulty: int, batch_size: int = 100000) -> Optional[Dict]:
-        """Mine using CUDA acceleration"""
+        """Mine using CUDA acceleration with CPU-side hash computation"""
         if not self.cuda_available:
             return None
             
@@ -56,24 +56,27 @@ class CUDAManager:
             nonce_start = 0
             start_time = time.time()
             
+            # Pre-compute the base string without nonce for efficiency
+            base_data = {k: v for k, v in mining_data.items() if k != 'nonce'}
+            
             while True:
-                # Prepare batch data for GPU
-                nonces = cp.arange(nonce_start, nonce_start + batch_size, dtype=cp.uint64)
-                mining_strings = self._prepare_mining_batch(mining_data, nonces)
+                # Generate nonces on GPU for parallel processing
+                nonces_gpu = cp.arange(nonce_start, nonce_start + batch_size, dtype=cp.int64)
+                nonces_cpu = cp.asnumpy(nonces_gpu)  # Transfer to CPU for hashing
                 
-                # Compute hashes on GPU
-                hashes = self._compute_hashes_gpu(mining_strings)
+                # Compute hashes in parallel on CPU (GPU hash acceleration requires custom CUDA kernels)
+                hashes = self._compute_hashes_parallel(base_data, nonces_cpu)
                 
                 # Check for successful hash
                 for i, hash_hex in enumerate(hashes):
                     if hash_hex.startswith(target):
                         mining_time = time.time() - start_time
-                        successful_nonce = nonce_start + i
+                        successful_nonce = int(nonces_cpu[i])
                         
                         return {
                             "success": True,
                             "hash": hash_hex,
-                            "nonce": int(successful_nonce),
+                            "nonce": successful_nonce,
                             "mining_time": mining_time,
                             "method": "cuda"
                         }
@@ -85,36 +88,28 @@ class CUDAManager:
                     current_time = time.time()
                     hashrate = nonce_start / (current_time - start_time)
                     print(f"⏳ CUDA: {nonce_start:,} attempts | {hashrate:,.0f} H/s")
+                
+                # Timeout check
+                if time.time() - start_time > 300:  # 5 minutes timeout
+                    break
                     
         except Exception as e:
             print(f"CUDA mining error: {e}")
             
         return None
     
-    def _prepare_mining_batch(self, mining_data: Dict, nonces) -> Any:
-        """Prepare batch mining data for GPU"""
-        mining_strings = []
+    def _compute_hashes_parallel(self, base_data: Dict, nonces: list) -> list:
+        """Compute SHA256 hashes in parallel on CPU (string operations not supported on GPU)"""
+        hashes = []
         
         for nonce in nonces:
+            # Create mining data with current nonce
+            mining_data = base_data.copy()
             mining_data["nonce"] = int(nonce)
-            data_string = json.dumps(mining_data, sort_keys=True)
-            mining_strings.append(data_string.encode())
             
-        return cp.array(mining_strings)
-    
-    def _compute_hashes_gpu(self, mining_strings) -> list:
-        """Compute SHA256 hashes on GPU"""
-        # Convert to CuPy array if needed
-        if not isinstance(mining_strings, cp.ndarray):
-            mining_strings = cp.array(mining_strings)
-        
-        # This is a simplified implementation
-        # In a real implementation, you'd use proper CUDA kernels
-        hashes = []
-        for data in mining_strings:
-            # For now, fall back to CPU hashing
-            # A real implementation would use CUDA-accelerated hashing
-            hash_obj = hashlib.sha256(data.tobytes())
+            # Compute hash
+            data_string = json.dumps(mining_data, sort_keys=True)
+            hash_obj = hashlib.sha256(data_string.encode())
             hashes.append(hash_obj.hexdigest())
             
         return hashes

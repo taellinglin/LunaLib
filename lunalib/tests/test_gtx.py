@@ -1,3 +1,10 @@
+import sys
+def safe_print(*args, **kwargs):
+    encoding = sys.stdout.encoding or 'utf-8'
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import pytest
 from lunalib.gtx.genesis import GTXGenesis
 from lunalib.gtx.digital_bill import DigitalBill
@@ -84,11 +91,11 @@ class TestGTXGenesis:
 
         # DEBUG: Check what get_bill returns
         bill_data_from_registry = test_gtx.bill_registry.get_bill(bill_serial)
-        print(f"DEBUG: Bill data from registry: {bill_data_from_registry}")
+        safe_print(f"DEBUG: Bill data from registry: {bill_data_from_registry}")
 
         # Test verification - should pass METHOD 1
         result = test_gtx.verify_bill(bill_serial)
-        print(f"DEBUG: Verification result: {result}")
+        safe_print(f"DEBUG: Verification result: {result}")
         
         assert result["valid"] is True
 

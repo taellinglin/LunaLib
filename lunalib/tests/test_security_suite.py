@@ -1,3 +1,10 @@
+import sys
+def safe_print(*args, **kwargs):
+    encoding = sys.stdout.encoding or 'utf-8'
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 """
 Comprehensive Security and Integration Test Suite
 
@@ -815,11 +822,11 @@ if __name__ == '__main__':
     result = runner.run(suite)
     
     # Print summary
-    print("\n" + "="*70)
-    print("COMPREHENSIVE TEST SUMMARY")
-    print("="*70)
-    print(f"Tests Run: {result.testsRun}")
-    print(f"Failures: {len(result.failures)}")
-    print(f"Errors: {len(result.errors)}")
-    print(f"Success Rate: {((result.testsRun - len(result.failures) - len(result.errors)) / result.testsRun * 100):.1f}%")
-    print("="*70)
+    safe_print("\n" + "="*70)
+    safe_print("COMPREHENSIVE TEST SUMMARY")
+    safe_print("="*70)
+    safe_print(f"Tests Run: {result.testsRun}")
+    safe_print(f"Failures: {len(result.failures)}")
+    safe_print(f"Errors: {len(result.errors)}")
+    safe_print(f"Success Rate: {((result.testsRun - len(result.failures) - len(result.errors)) / result.testsRun * 100):.1f}%")
+    safe_print("="*70)

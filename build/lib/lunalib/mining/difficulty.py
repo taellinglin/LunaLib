@@ -65,6 +65,44 @@ class DifficultySystem:
             
         return base_reward * (1 + time_bonus)
     
+    def calculate_block_reward(self, difficulty: int) -> float:
+        """Calculate block reward based on difficulty using exponential system
+        
+        Reward = 10^(difficulty - 1)
+        difficulty 1 = 1 LKC (10^0)
+        difficulty 2 = 10 LKC (10^1)
+        difficulty 3 = 100 LKC (10^2)
+        difficulty 9 = 100,000,000 LKC (10^8)
+        """
+        if difficulty < 1:
+            difficulty = 1
+        elif difficulty > 9:
+            difficulty = 9
+        
+        return 10 ** (difficulty - 1)
+    
+    def validate_block_hash(self, block_hash: str, difficulty: int) -> bool:
+        """Validate that block hash meets difficulty requirement"""
+        if not block_hash or difficulty < 1:
+            return False
+        
+        target_prefix = "0" * difficulty
+        return block_hash.startswith(target_prefix)
+    
+    def validate_block_structure(self, block: dict) -> tuple:
+        """Validate block has all required fields
+        
+        Returns: (is_valid, error_message)
+        """
+        required_fields = ['index', 'previous_hash', 'timestamp', 'transactions',
+                          'miner', 'difficulty', 'nonce', 'hash', 'reward']
+        
+        for field in required_fields:
+            if field not in block:
+                return False, f"Missing required field: {field}"
+        
+        return True, ""
+    
     def get_difficulty_name(self, difficulty_level):
         """Get human-readable name for difficulty level"""
         names = {

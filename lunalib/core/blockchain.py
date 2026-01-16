@@ -1,20 +1,27 @@
+from tqdm import tqdm
 # blockchain.py - Updated version
 
 from ..storage.cache import BlockchainCache
 import requests
 import time
 import json
-from typing import Dict, List, Optional, Tuple
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
+from typing import Dict, List, Optional, Tuple, Callable
 
 
 class BlockchainManager:
     """Manages blockchain interactions and scanning with transaction broadcasting"""
     
-    def __init__(self, endpoint_url="https://bank.linglin.art"):
+    def __init__(self, endpoint_url="https://bank.linglin.art", max_workers=10):
         self.endpoint_url = endpoint_url.rstrip('/')
         self.cache = BlockchainCache()
         self.network_connected = False
         self._stop_events = []  # Track background monitors so they can be stopped
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="BlockchainWorker")
+        self._async_tasks = {}  # Track async tasks by ID
+        self._task_callbacks = {}  # Callbacks for task completion
 
     # ------------------------------------------------------------------
     # Address helpers
@@ -26,6 +33,30 @@ class BlockchainManager:
         addr_str = str(addr).strip("'\" ").lower()
         return addr_str[4:] if addr_str.startswith('lun_') else addr_str
         
+    def broadcast_transaction_async(self, transaction: Dict, callback: Callable = None) -> str:
+        """Async version: Broadcast transaction in background thread
+        
+        Returns: task_id that can be used to check status
+        """
+        task_id = f"broadcast_{transaction.get('hash', 'unknown')}_{int(time.time())}"
+        
+        def _broadcast_task():
+            try:
+                success, message = self.broadcast_transaction(transaction)
+                if callback:
+                    callback(success=success, result=message, error=None if success else message)
+                return (success, message)
+            except Exception as e:
+                print(f"❌ Async broadcast error: {e}")
+                if callback:
+                    callback(success=False, result=None, error=str(e))
+                return (False, str(e))
+        
+        future = self.executor.submit(_broadcast_task)
+        self._async_tasks[task_id] = future
+        print(f"🔄 Started async broadcast: {task_id}")
+        return task_id
+    
     def broadcast_transaction(self, transaction: Dict) -> Tuple[bool, str]:
         """Broadcast transaction to mempool with enhanced error handling"""
         try:
@@ -210,15 +241,39 @@ class BlockchainManager:
             
         return None
     
+    def get_blocks_range_async(self, start_height: int, end_height: int, callback: Callable = None) -> str:
+        """Async version: Get range of blocks in background thread
+        
+        Returns: task_id that can be used to check status
+        """
+        task_id = f"blocks_range_{start_height}_{end_height}_{int(time.time())}"
+        
+        def _fetch_task():
+            try:
+                result = self.get_blocks_range(start_height, end_height)
+                if callback:
+                    callback(success=True, result=result, error=None)
+                return result
+            except Exception as e:
+                print(f"❌ Async blocks fetch error: {e}")
+                if callback:
+                    callback(success=False, result=None, error=str(e))
+                return None
+        
+        future = self.executor.submit(_fetch_task)
+        self._async_tasks[task_id] = future
+        print(f"🔄 Started async blocks fetch: {task_id}")
+        return task_id
+    
     def get_blocks_range(self, start_height: int, end_height: int) -> List[Dict]:
         """Get range of blocks"""
         blocks = []
-        
+
         # Check cache first
         cached_blocks = self.cache.get_block_range(start_height, end_height)
         if len(cached_blocks) == (end_height - start_height + 1):
             return cached_blocks
-            
+
         try:
             response = requests.get(
                 f'{self.endpoint_url}/blockchain/range?start={start_height}&end={end_height}',
@@ -232,15 +287,15 @@ class BlockchainManager:
                     self.cache.save_block(height, block.get('hash', ''), block)
             else:
                 # Fallback: get blocks individually
-                for height in range(start_height, end_height + 1):
+                for height in tqdm(range(start_height, end_height + 1), desc="Get Blocks", leave=False):
                     block = self.get_block(height)
                     if block:
                         blocks.append(block)
                     time.sleep(0.01)  # Be nice to the API
-                        
+
         except Exception as e:
             print(f"Get blocks range error: {e}")
-            
+
         return blocks
     
     def get_mempool(self) -> List[Dict]:
@@ -268,24 +323,46 @@ class BlockchainManager:
         """Scan blockchain for transactions involving an address"""
         if end_height is None:
             end_height = self.get_blockchain_height()
-        
+
         print(f"[SCAN] Scanning transactions for {address} from block {start_height} to {end_height}")
-            
+
         transactions = []
-        
-        # Scan in batches for efficiency
         batch_size = 100
-        for batch_start in range(start_height, end_height + 1, batch_size):
+        total_batches = ((end_height - start_height) // batch_size) + 1
+        for batch_start in tqdm(range(start_height, end_height + 1, batch_size), desc=f"Scan {address}", total=total_batches):
             batch_end = min(batch_start + batch_size - 1, end_height)
-            print(f"[SCAN] Processing batch {batch_start}-{batch_end}...")
             blocks = self.get_blocks_range(batch_start, batch_end)
-            
             for block in blocks:
                 block_transactions = self._find_address_transactions(block, address)
                 transactions.extend(block_transactions)
-        
+
         print(f"[SCAN] Found {len(transactions)} total transactions for {address}")
         return transactions
+    
+    def scan_transactions_for_address_async(self, address: str, callback: Callable = None, 
+                                           start_height: int = 0, end_height: int = None) -> str:
+        """Async version: Scan blockchain in background thread, call callback when done
+        
+        Returns: task_id that can be used to check status
+        """
+        task_id = f"scan_{address}_{int(time.time())}"
+        
+        def _scan_task():
+            try:
+                result = self.scan_transactions_for_address(address, start_height, end_height)
+                if callback:
+                    callback(success=True, result=result, error=None)
+                return result
+            except Exception as e:
+                print(f"❌ Async scan error: {e}")
+                if callback:
+                    callback(success=False, result=None, error=str(e))
+                return None
+        
+        future = self.executor.submit(_scan_task)
+        self._async_tasks[task_id] = future
+        print(f"🔄 Started async scan task: {task_id}")
+        return task_id
 
     def scan_transactions_for_addresses(self, addresses: List[str], start_height: int = 0, end_height: int = None) -> Dict[str, List[Dict]]:
         """Scan the blockchain once for multiple addresses (rewards and transfers)."""
@@ -310,11 +387,10 @@ class BlockchainManager:
         results: Dict[str, List[Dict]] = {addr: [] for addr in addresses}
 
         batch_size = 100
-        for batch_start in range(start_height, end_height + 1, batch_size):
+        total_batches = ((end_height - start_height) // batch_size) + 1
+        for batch_start in tqdm(range(start_height, end_height + 1, batch_size), desc="Multi-Scan", total=total_batches):
             batch_end = min(batch_start + batch_size - 1, end_height)
-            print(f"[MULTI-SCAN] Processing batch {batch_start}-{batch_end}...")
             blocks = self.get_blocks_range(batch_start, batch_end)
-
             for block in blocks:
                 collected = self._collect_transactions_for_addresses(block, normalized_map)
                 for original_addr, txs in collected.items():
@@ -328,7 +404,84 @@ class BlockchainManager:
             print(f"  - {addr}: {len(results[addr])} transactions")
 
         return results
+    
+    def scan_transactions_for_addresses_async(self, addresses: List[str], callback: Callable = None,
+                                             start_height: int = 0, end_height: int = None) -> str:
+        """Async version: Scan blockchain for multiple addresses in background thread
+        
+        Returns: task_id that can be used to check status
+        """
+        task_id = f"multi_scan_{int(time.time())}"
+        
+        def _scan_task():
+            try:
+                result = self.scan_transactions_for_addresses(addresses, start_height, end_height)
+                if callback:
+                    callback(success=True, result=result, error=None)
+                return result
+            except Exception as e:
+                print(f"❌ Async multi-scan error: {e}")
+                if callback:
+                    callback(success=False, result=None, error=str(e))
+                return None
+        
+        future = self.executor.submit(_scan_task)
+        self._async_tasks[task_id] = future
+        print(f"🔄 Started async multi-scan task: {task_id}")
+        return task_id
 
+    def get_task_status(self, task_id: str) -> Dict:
+        """Check status of an async task
+        
+        Returns: {'status': 'running'|'completed'|'failed'|'not_found', 'result': any, 'error': str}
+        """
+        if task_id not in self._async_tasks:
+            return {'status': 'not_found', 'result': None, 'error': 'Task not found'}
+        
+        future = self._async_tasks[task_id]
+        
+        if future.running():
+            return {'status': 'running', 'result': None, 'error': None}
+        elif future.done():
+            try:
+                result = future.result(timeout=0)
+                return {'status': 'completed', 'result': result, 'error': None}
+            except Exception as e:
+                return {'status': 'failed', 'result': None, 'error': str(e)}
+        else:
+            return {'status': 'pending', 'result': None, 'error': None}
+    
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel a running async task
+        
+        Returns: True if cancelled, False otherwise
+        """
+        if task_id in self._async_tasks:
+            future = self._async_tasks[task_id]
+            if future.cancel():
+                del self._async_tasks[task_id]
+                print(f"✅ Task cancelled: {task_id}")
+                return True
+        return False
+    
+    def get_active_tasks(self) -> List[str]:
+        """Get list of active task IDs"""
+        return [task_id for task_id, future in self._async_tasks.items() if future.running()]
+    
+    def cleanup_completed_tasks(self):
+        """Remove completed tasks from tracking"""
+        completed = [task_id for task_id, future in self._async_tasks.items() if future.done()]
+        for task_id in completed:
+            del self._async_tasks[task_id]
+        if completed:
+            print(f"🧹 Cleaned up {len(completed)} completed tasks")
+    
+    def shutdown(self):
+        """Shutdown the thread pool executor"""
+        print("🛑 Shutting down BlockchainManager executor...")
+        self.executor.shutdown(wait=True)
+        print("✅ Executor shutdown complete")
+    
     def monitor_addresses(self, addresses: List[str], on_update, poll_interval: int = 15):
         """Start background monitor for addresses; returns a stop event."""
         import threading
@@ -379,6 +532,30 @@ class BlockchainManager:
         thread.start()
         return stop_event
 
+    def submit_mined_block_async(self, block_data: Dict, callback: Callable = None) -> str:
+        """Async version: Submit mined block in background thread
+        
+        Returns: task_id that can be used to check status
+        """
+        task_id = f"submit_block_{block_data.get('index', 'unknown')}_{int(time.time())}"
+        
+        def _submit_task():
+            try:
+                success = self.submit_mined_block(block_data)
+                if callback:
+                    callback(success=success, result=block_data if success else None, error=None if success else "Submission failed")
+                return success
+            except Exception as e:
+                print(f"❌ Async block submission error: {e}")
+                if callback:
+                    callback(success=False, result=None, error=str(e))
+                return False
+        
+        future = self.executor.submit(_submit_task)
+        self._async_tasks[task_id] = future
+        print(f"🔄 Started async block submission: {task_id}")
+        return task_id
+    
     def submit_mined_block(self, block_data: Dict) -> bool:
         """Submit a mined block to the network with built-in validation"""
         try:
@@ -736,7 +913,7 @@ class BlockchainManager:
                 transactions.append(enhanced_tx)
                 print(f"⬇️ Found outgoing transaction: {amount} LUN + {fee} fee")
         
-        print(f"📊 Scan complete for block #{block.get('index')}: {len(transactions)} transactions found")
+        print(f" Scan complete for block #{block.get('index')}: {len(transactions)} transactions found")
         return transactions
     def _handle_regular_transfers(self, tx: Dict, address_lower: str) -> Dict:
         """Handle regular transfer transactions that might be in different formats"""

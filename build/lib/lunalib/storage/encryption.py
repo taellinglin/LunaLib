@@ -1,5 +1,14 @@
 import os
 import json
+import sys
+
+# --- Unicode-safe print for Windows console ---
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', 'utf-8')
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import base64
 import hashlib
 from cryptography.fernet import Fernet
@@ -37,7 +46,7 @@ class EncryptionManager:
             }
             
         except Exception as e:
-            print(f"Encryption error: {e}")
+            safe_print(f"Encryption error: {e}")
             return {}
     
     def decrypt_wallet(self, encrypted_data: Dict, password: str) -> Optional[Dict]:
@@ -65,7 +74,7 @@ class EncryptionManager:
             return wallet_data
             
         except Exception as e:
-            print(f"Decryption error: {e}")
+            safe_print(f"Decryption error: {e}")
             return None
     
     def _derive_key(self, password: str) -> bytes:
