@@ -1,5 +1,6 @@
 
 from lunalib.storage.database import WalletDatabase
+import json
 
 
 class WalletDB:
@@ -37,22 +38,15 @@ class WalletDB:
 
     def list_wallets(self):
         # Return list of tuples for compatibility: (address, label, is_locked, balance, available_balance)
-        import sqlite3
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT address, label, metadata, balance FROM wallets')
-        rows = cursor.fetchall()
-        conn.close()
+        wallets = self.db.list_wallets()
         result = []
-        for row in rows:
-            address, label, metadata_json, balance = row
-            meta = {}
-            try:
-                meta = json.loads(metadata_json) if metadata_json else {}
-            except Exception:
-                pass
-            is_locked = meta.get('is_locked', False)
-            available_balance = meta.get('available_balance', 0.0)
+        for wallet in wallets:
+            address = wallet.get("address")
+            label = wallet.get("label", "")
+            balance = wallet.get("balance", 0.0)
+            meta = wallet.get("metadata", {}) or {}
+            is_locked = meta.get("is_locked", False)
+            available_balance = meta.get("available_balance", 0.0)
             result.append((address, label, is_locked, balance, available_balance))
         return result
 

@@ -1,9 +1,13 @@
 import os
-import sqlite3
+if sys.platform != "emscripten":
+    import sqlite3
+else:
+    sqlite3 = None
 import json
 import time
 from typing import Dict, List, Optional, Any
 import sys
+from .indexeddb import IndexedDBStore
 
 # --- Unicode-safe print for Windows console ---
 def safe_print(*args, **kwargs):
@@ -18,11 +22,21 @@ class WalletDatabase:
     
     def __init__(self, db_path=None):
         self.db_path = db_path or os.path.join(os.path.expanduser("~"), ".luna_wallet", "wallets.db")
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._use_indexeddb = sys.platform == "emscripten"
+        self._idb = None
+        if not self._use_indexeddb:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_database()
     
     def _init_database(self):
         """Initialize wallet database"""
+        if self._use_indexeddb:
+            self._idb = IndexedDBStore(
+                db_name="lunalib",
+                stores=["wallets", "transactions", "pending_transactions"],
+            )
+            return
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -82,6 +96,8 @@ class WalletDatabase:
     def save_wallet(self, wallet_data: Dict) -> bool:
         """Save wallet to database"""
         try:
+            if self._use_indexeddb and self._idb:
+                return self._idb.put("wallets", wallet_data["address"], wallet_data)
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
@@ -111,6 +127,8 @@ class WalletDatabase:
     def load_wallet(self, address: str) -> Optional[Dict]:
         """Load wallet from database"""
         try:
+            if self._use_indexeddb and self._idb:
+                return self._idb.get("wallets", address)
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
@@ -138,6 +156,15 @@ class WalletDatabase:
     def save_transaction(self, transaction: Dict, wallet_address: str) -> bool:
         """Save transaction to database"""
         try:
+            if self._use_indexeddb and self._idb:
+                tx_hash = transaction.get("hash", "")
+                payload = {
+                    "tx_hash": tx_hash,
+                    "wallet_address": wallet_address,
+                    "timestamp": transaction.get("timestamp", time.time()),
+                    "raw_data": transaction,
+                }
+                return self._idb.put("transactions", tx_hash, payload)
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
@@ -172,6 +199,15 @@ class WalletDatabase:
     def get_wallet_transactions(self, wallet_address: str, limit: int = 100) -> List[Dict]:
         """Get transactions for a wallet"""
         try:
+            if self._use_indexeddb and self._idb:
+                items = self._idb.get_all_items("transactions")
+                txs = []
+                for item in items:
+                    payload = item.get("value")
+                    if payload and payload.get("wallet_address") == wallet_address:
+                        txs.append(payload.get("raw_data", {}))
+                txs.sort(key=lambda t: t.get("timestamp", 0), reverse=True)
+                return txs[:limit]
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
@@ -202,6 +238,16 @@ class WalletDatabase:
     def save_pending_transaction(self, transaction: Dict, wallet_address: str) -> bool:
         """Save pending transaction"""
         try:
+            if self._use_indexeddb and self._idb:
+                tx_hash = transaction.get("hash", "")
+                payload = {
+                    "tx_hash": tx_hash,
+                    "wallet_address": wallet_address,
+                    "created_time": time.time(),
+                    "status": "pending",
+                    "raw_data": transaction,
+                }
+                return self._idb.put("pending_transactions", tx_hash, payload)
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
@@ -229,3 +275,31 @@ class WalletDatabase:
         except Exception as e:
             safe_print(f"Save pending transaction error: {e}")
             return False
+
+    def list_wallets(self) -> List[Dict[str, Any]]:
+        """List all wallets"""
+        try:
+            if self._use_indexeddb and self._idb:
+                items = self._idb.get_all_items("wallets")
+                return [item.get("value") for item in items if item.get("value")]
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM wallets')
+            results = cursor.fetchall()
+            conn.close()
+            wallets = []
+            for result in results:
+                wallets.append({
+                    'address': result[0],
+                    'label': result[1],
+                    'public_key': result[2],
+                    'encrypted_private_key': result[3],
+                    'balance': result[4],
+                    'created': result[5],
+                    'last_accessed': result[6],
+                    'metadata': json.loads(result[7]) if result[7] else {},
+                })
+            return wallets
+        except Exception as e:
+            safe_print(f"List wallets error: {e}")
+            return []

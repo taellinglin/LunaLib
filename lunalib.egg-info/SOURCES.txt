@@ -51,6 +51,7 @@ lunalib/storage/__init__.py
 lunalib/storage/cache.py
 lunalib/storage/database.py
 lunalib/storage/encryption.py
+lunalib/storage/indexeddb.py
 lunalib/storage/__pycache__/__init__.cpython-310.pyc
 lunalib/storage/__pycache__/cache.cpython-310.pyc
 lunalib/storage/__pycache__/database.cpython-310.pyc

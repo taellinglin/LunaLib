@@ -3,6 +3,7 @@
 import time
 import requests
 import threading
+import sys
 from queue import Queue
 from typing import Dict, List, Optional, Set
 import json
@@ -19,10 +20,12 @@ class MempoolManager:
         self.max_mempool_size = 10000
         self.broadcast_retries = 3
         self.is_running = True
+        self._threading_enabled = sys.platform != "emscripten"
         
-        # Start background broadcasting thread
-        self.broadcast_thread = threading.Thread(target=self._broadcast_worker, daemon=True)
-        self.broadcast_thread.start()
+        # Start background broadcasting thread (disabled on Pyodide)
+        if self._threading_enabled:
+            self.broadcast_thread = threading.Thread(target=self._broadcast_worker, daemon=True)
+            self.broadcast_thread.start()
 
     # ----------------------
     # Address normalization
@@ -63,8 +66,12 @@ class MempoolManager:
             print(f"DEBUG: Added transaction to mempool: {tx_hash}")
             
             # Queue for broadcasting
-            self.pending_broadcasts.put(transaction)
-            print(f"DEBUG: Queued transaction for broadcasting: {tx_hash}")
+            if self._threading_enabled:
+                self.pending_broadcasts.put(transaction)
+                print(f"DEBUG: Queued transaction for broadcasting: {tx_hash}")
+            else:
+                print(f"DEBUG: Broadcasting inline (no threads available): {tx_hash}")
+                self.broadcast_transaction(transaction)
             
             return True
             
