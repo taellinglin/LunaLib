@@ -1,5 +1,5 @@
 
-from lunalib.storage.database import WalletDatabase
+from lunalib.storage.database import WalletDatabase, get_default_wallet_dir, resolve_wallet_db_path
 import json
 
 
@@ -7,9 +7,11 @@ class WalletDB:
     def __init__(self, data_dir=None):
         # data_dir is kept for compatibility, but db_path is passed to WalletDatabase
         import os
-        self.data_dir = data_dir or os.path.expanduser("~/.lunawallet")
+        self.data_dir = data_dir or get_default_wallet_dir()
         os.makedirs(self.data_dir, exist_ok=True)
-        self.db_path = os.path.join(self.data_dir, "wallets.db")
+        self.db_path = resolve_wallet_db_path(
+            os.path.join(self.data_dir, "wallets.db") if data_dir else None
+        )
         print(f"[WalletDB] data_dir: {self.data_dir}")
         print(f"[WalletDB] db_path: {self.db_path}")
         self.db = WalletDatabase(db_path=self.db_path)

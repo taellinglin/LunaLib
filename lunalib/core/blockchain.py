@@ -222,6 +222,34 @@ class BlockchainManager:
         except Exception as e:
             print(f"Get latest block error: {e}")
         return None
+
+    def scan_chain(self, peer_urls: Optional[List[str]] = None) -> Optional[Dict]:
+        """Download full blockchain, favoring primary and falling back to peers."""
+        def _fetch(base_url: str) -> Optional[Dict]:
+            for url in (f"{base_url}/blockchain", f"{base_url}/api/blockchain/full"):
+                try:
+                    response = requests.get(url, timeout=30)
+                    if response.status_code == 200:
+                        data = response.json()
+                        print(f"✅ Downloaded blockchain: {len(data.get('blocks', []))} blocks")
+                        return data
+                except Exception:
+                    continue
+            return None
+
+        data = _fetch(self.endpoint_url)
+        if data:
+            return data
+
+        if peer_urls:
+            for peer_url in peer_urls:
+                data = _fetch(peer_url.rstrip('/'))
+                if data:
+                    print(f"✅ Downloaded blockchain from peer: {peer_url}")
+                    return data
+
+        print("❌ Failed to download blockchain from primary and peers")
+        return None
     
     def get_block(self, height: int) -> Optional[Dict]:
         """Get block by height"""

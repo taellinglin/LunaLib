@@ -1,224 +1,120 @@
-# Luna Library
+# LunaLib
 
-**A Complete Cryptocurrency Wallet and Mining System**  
-*Developed by Ling Lin • [LingLin.Art](https://linglin.art) • LingLin.Art, LLC*
+LunaLib is a modular cryptocurrency ecosystem library with wallet, blockchain, mining, storage, mempool, and P2P components.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)]()
+## Installation
 
-## 🌟 Overview
-
-Luna Library is a comprehensive cryptocurrency system featuring secure wallet management, GTX Genesis digital bill mining, and blockchain transaction processing. Built with security and performance in mind, it provides the foundation for cryptocurrency applications including wallets, casinos, nodes, and treasury systems.
-
-## 🚀 Features
-
-### 💰 Wallet Management
-- **Secure Key Generation**: Cryptographically secure private/public key pairs
-- **Encrypted Storage**: AES-256 encrypted wallet files with password protection
-- **Multi-Wallet Support**: Manage multiple wallets with individual labels
-- **Import/Export**: Backup and restore wallets using private keys
-- **Transaction History**: Complete transaction tracking and balance management
-
-### ⛏️ GTX Genesis Mining
-- **Digital Bill Mining**: Mine GTX Genesis bills with denomination-based difficulty
-- **Proof-of-Work**: Configurable difficulty (2-10 leading zeros) based on bill value
-- **CUDA Acceleration**: GPU-accelerated mining for improved performance
-- **Bill Registry**: Track mined bills with verification URLs and metadata
-- **1:1 Luna Value**: Each GTX bill denomination equals equivalent Luna value
-
-### 🔗 Blockchain Integration
-- **Network Connectivity**: Connect to Luna blockchain nodes
-- **Transaction Broadcasting**: Send signed transactions to the network
-- **Blockchain Scanning**: Efficient blockchain scanning for address activity
-- **Mempool Monitoring**: Real-time transaction pool monitoring
-- **Caching System**: Optimized caching for improved performance
-
-### 🔒 Security & Validation
-- **Cryptographic Signing**: Secure transaction signing with ECDSA
-- **Transaction Validation**: Comprehensive security validation for all transaction types
-- **Anti-Spam Protection**: Rate limiting and blacklisting capabilities
-- **Risk Assessment**: Transaction risk level evaluation
-- **Network Security**: Protection against malicious activities
-
-## 📦 Installation
-
-### Prerequisites
-- Python 3.7 or higher
-- pip (Python package manager)
-
-### Install from Source
-
-1. **Clone the repository**:
-```bash
-git clone https://github.com/linglin-art/luna_lib.git
-cd luna_lib
-```
-2. **Install Requirements**
-```bash
-pip install -r requirements.txt
-```
-3. **Install with Pip**
 ```bash
 pip install -e .
 ```
-Optional: **CUDA Support**
-```bash
-Optional: CUDA Support
 
-For GPU-accelerated mining, install CUDA dependencies:
-```
+## Quick Start
 
-
-## Basic Usage:
+### Wallet
 
 ```python
-from luna_lib import LunaWallet, GenesisMiner, GTXGenesis
+from lunalib.core.wallet import LunaWallet
 
-# Create a new wallet
 wallet = LunaWallet()
-wallet_data = wallet.create_wallet("My Wallet", "secure_password")
-
-print(f"Wallet created: {wallet_data['address']}")
-
-# Initialize miner
-miner = GenesisMiner()
-
-# Mine a GTX $1000 bill
-bill = miner.mine_bill(1000, wallet_data['address'])
-
-if bill['success']:
-    print(f"✅ Mined GTX ${bill['denomination']:,} bill!")
-    print(f"💰 Luna value: {bill['luna_value']:,}")
-    print(f"🔗 Verification: {bill.get('verification_url', 'N/A')}")
-```
-    
-## Advanced Usage
-```python
-from luna_lib import GTXGenesis, BlockchainManager
-from luna_lib.gtx.bill_registry import BillRegistry
-
-# Check GTX portfolio
-gtx = GTXGenesis()
-portfolio = gtx.get_user_portfolio(wallet_data['address'])
-
-print(f"Total GTX bills: {portfolio['total_bills']}")
-print(f"Total Luna value: {portfolio['total_luna_value']:,}")
-
-# Scan blockchain for transactions
-blockchain = BlockchainManager()
-transactions = blockchain.scan_transactions_for_address(wallet_data['address'])
-
-print(f"Found {len(transactions)} transactions")
-
-```
-## Project Structure
-
-```
-luna_lib/
-├── core/              # Core wallet and blockchain functionality
-│   ├── wallet.py      # Wallet management
-│   ├── blockchain.py  # Blockchain interactions
-│   └── crypto.py      # Cryptographic operations
-├── mining/            # Mining-related components
-│   ├── miner.py       # Genesis bill miner
-│   ├── difficulty.py  # Difficulty calculations
-│   └── cuda_manager.py # GPU acceleration
-├── gtx/               # GTX Genesis system
-│   ├── genesis.py     # Main GTX manager
-│   ├── digital_bill.py # Digital bill representation
-│   └── bill_registry.py # Bill database
-├── transactions/      # Transaction processing
-│   ├── transaction.py # Transaction creation
-│   ├── security.py    # Security validation
-│   └── validator.py   # Transaction validation
-└── storage/           # Data storage
-    ├── database.py    # Wallet database
-    ├── cache.py       # Blockchain cache
-    └── encryption.py  # Encryption utilities
-
+wallet_data = wallet.create_wallet("main", "password")
+wallet.unlock_wallet(wallet_data["address"], "password")
 ```
 
-# **API Reference**
-Core Classes
-
-    LunaWallet: Main wallet management class
-
-    GenesisMiner: GTX Genesis bill mining
-
-    GTXGenesis: GTX bill management and verification
-
-    BlockchainManager: Blockchain interactions
-
-    TransactionManager: Transaction creation and signing
-
-## ***Key Methods***
-### **Wallet Management**
-```python
-wallet.create_wallet(label, password)  # Create new wallet
-wallet.unlock_wallet(address, password)  # Unlock existing wallet
-wallet.export_private_key(address, password)  # Export private key
-```
-
-## ***Mining***
-```python
-miner.mine_bill(denomination, address)  # Mine single bill
-miner.start_auto_mining(denominations, address)  # Auto-mine multiple bills
-miner.stop_mining()  # Stop mining operations
-```
-
-## **GTX Management**
+### Blockchain Manager
 
 ```python
-gtx.verify_bill(bill_serial)  # Verify bill authenticity
-gtx.get_user_portfolio(address)  # Get user's GTX portfolio
-gtx.transfer_bill(bill_serial, from_addr, to_addr, priv_key)  # Transfer bill
+from lunalib.core.blockchain import BlockchainManager
+
+chain = BlockchainManager(endpoint_url="https://bank.linglin.art")
+latest = chain.get_latest_block()
 ```
-# Configuration
-## **Environment Variables**
+
+### Mempool
+
+```python
+from lunalib.core.mempool import MempoolManager
+
+mempool = MempoolManager()
+```
+
+### Daemon (Authoritative Validation)
+
+```python
+from lunalib.core.blockchain import BlockchainManager
+from lunalib.core.mempool import MempoolManager
+from lunalib.core.daemon import BlockchainDaemon
+
+chain = BlockchainManager(endpoint_url="https://bank.linglin.art")
+mempool = MempoolManager()
+daemon = BlockchainDaemon(chain, mempool)
+```
+
+### P2P Client
+
+```python
+from lunalib.core.p2p import P2PClient
+
+p2p = P2PClient(
+    "https://bank.linglin.art",
+    peer_seed_urls=["https://peer.example"],
+    prefer_peers=False,
+)
+```
+
+### Hybrid Client
+
+```python
+from lunalib.core.p2p import HybridBlockchainClient
+from lunalib.core.blockchain import BlockchainManager
+from lunalib.core.mempool import MempoolManager
+
+chain = BlockchainManager(endpoint_url="https://bank.linglin.art")
+mempool = MempoolManager()
+hybrid = HybridBlockchainClient("https://bank.linglin.art", chain, mempool)
+```
+
+### Scan Full Chain with Fallback
+
+```python
+from lunalib.core.blockchain import BlockchainManager
+
+chain = BlockchainManager(endpoint_url="https://bank.linglin.art")
+full_chain = chain.scan_chain(peer_urls=["https://peer.example"])
+```
+
+## Web Builds (Pyodide)
+
+- SQLite is disabled on web builds; IndexedDB is used automatically for cache and wallet storage.
+- Threaded broadcast loops are disabled on Pyodide; mempool broadcasts run inline.
+
+## Testing
 
 ```bash
-export LUNA_ENDPOINT_URL="https://bank.linglin.art"  # Blockchain endpoint
-export LUNA_DATA_DIR="$HOME/.luna_wallet"  # Data directory
+pytest -q
 ```
 
-## **Bill Denominations**
+### Test Coverage Highlights
 
-Supported GTX Genesis bill denominations:
-```bash
-  $1 (Difficulty: 2 zeros)
-  $10 (Difficulty: 3 zeros)
-  $100 (Difficulty: 4 zeros)
-  $1,000 (Difficulty: 5 zeros)
-  $10,000 (Difficulty: 6 zeros)
-  $100,000 (Difficulty: 7 zeros)
-  $1,000,000 (Difficulty: 8 zeros)
-  $10,000,000 (Difficulty: 9 zeros)
-  $100,000,000 (Difficulty: 10 zeros)
-```
+- Daemon validation for blocks and transactions
+- P2P primary/peer fallback behavior
+- Full-chain scan fallback
+- SM2 signing and verification
+- Encryption integrity and tamper detection
+- Mempool validation rules
 
-### **Contributing**
+## Module Initialization Guide
 
-We welcome contributions! Please see our Contributing Guidelines for details.
+| Module | Purpose | Initialize |
+| --- | --- | --- |
+| Wallet | Key management and local wallet operations | `LunaWallet()` |
+| Blockchain | Network chain queries and scans | `BlockchainManager(endpoint_url=...)` |
+| Mempool | Pending transaction tracking and broadcast | `MempoolManager()` |
+| Daemon | Authoritative validation and peer registry | `BlockchainDaemon(chain, mempool)` |
+| P2P | Peer discovery and sync | `P2PClient(primary_url, ...)` |
+| Hybrid | Primary + P2P combined mode | `HybridBlockchainClient(primary_url, chain, mempool)` |
+| Storage | Local encrypted data and cache | `EncryptionManager()` / `BlockchainCache()` |
 
-   - Fork the repository
+## Notes
 
-   - Create a feature branch (git checkout -b feature/amazing-feature)
-
-   - Commit your changes (git commit -m 'Add amazing feature')
-
-   - Push to the branch (git push origin feature/amazing-feature)
-
-   - Open a Pull Request
-
-## License
-  This project is licensed under the MIT License - see the LICENSE file for details.
-
-### Support
-
-    Email: taellinglin@gmail.com
-    Website: LingLin.Art
-
-    Built with ❤️ by Ling Lin and the LingLin.Art, LLC team
-
-Luna Library • Empowering the future of digital currency • LingLin.Art
+- Prefer the primary node for validation, but allow P2P fallback for availability.
+- For purely decentralized setups, use `prefer_peers=True` and provide seed peers.

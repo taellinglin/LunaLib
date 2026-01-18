@@ -498,7 +498,7 @@ class LunaWallet:
             pending = self._pending_tx_cache.get(self.address, [])
             pending_out, pending_in = self._compute_pending_totals(pending, self.address, current_height)
 
-            available_balance = max(0.0, total_balance - pending_out)
+            available_balance = max(0.0, total_balance + pending_in - pending_out)
 
             # Update both current wallet and wallets collection
             self.available_balance = available_balance
@@ -515,7 +515,7 @@ class LunaWallet:
             )
 
             if pending_in > 0:
-                print(f"DEBUG: Also {pending_in} LUN incoming (pending)")
+                print(f"DEBUG: Also {pending_in} LUN incoming (pending, including rewards)")
 
             return available_balance
 
@@ -603,7 +603,7 @@ class LunaWallet:
 
             total_balance = max(0.0, self._compute_confirmed_balance(confirmed))
             pending_out, pending_in = self._compute_pending_totals(pending, addr)
-            available_balance = max(0.0, total_balance - pending_out)
+            available_balance = max(0.0, total_balance + pending_in - pending_out)
 
             wallet_data["balance"] = total_balance
             wallet_data["available_balance"] = available_balance

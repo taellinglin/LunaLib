@@ -3,6 +3,7 @@ import time
 import requests
 import threading
 import json
+import sys
 from typing import List, Dict, Optional, Callable
 from queue import Queue
 import hashlib
@@ -14,10 +15,19 @@ class P2PClient:
     Downloads initial state from primary node, then syncs via P2P with periodic validation.
     """
     
-    def __init__(self, primary_node_url: str, node_id: Optional[str] = None, peer_url: Optional[str] = None):
+    def __init__(
+        self,
+        primary_node_url: str,
+        node_id: Optional[str] = None,
+        peer_url: Optional[str] = None,
+        peer_seed_urls: Optional[List[str]] = None,
+        prefer_peers: bool = False,
+    ):
         self.primary_node = primary_node_url
         self.node_id = node_id or self._generate_node_id()
         self.peer_url = peer_url or self._generate_peer_url()
+        self.peer_seed_urls = peer_seed_urls or []
+        self.prefer_peers = prefer_peers
         self.peers = []
         self.last_primary_check = 0
         self.last_peer_update = 0
@@ -80,20 +90,67 @@ class P2PClient:
         print("🛑 P2P Client stopped")
     
     def _initial_sync(self):
-        """Download initial blockchain and mempool from primary node"""
+        """Download initial blockchain, favoring primary but falling back to peers."""
+        def _peer_urls():
+            urls = []
+            for peer in self.peers:
+                peer_url = peer.get("url") or peer.get("peer_url")
+                if peer_url:
+                    urls.append(peer_url)
+            urls.extend(self.peer_seed_urls)
+            return list(dict.fromkeys(urls))
+
+        if self.prefer_peers:
+            data = self._fetch_chain_from_peers(_peer_urls())
+            if data:
+                return data
+
+        data = self._fetch_chain_from_primary()
+        if data:
+            return data
+
+        return self._fetch_chain_from_peers(_peer_urls())
+
+    def _fetch_chain_from_primary(self):
         try:
             print(f"📥 Initial sync from primary node: {self.primary_node}")
-            
-            # Download blockchain
-            response = requests.get(f"{self.primary_node}/api/blockchain/full", timeout=30)
+            return self._fetch_chain_from_base(self.primary_node)
+        except Exception as e:
+            print(f"❌ Primary sync failed: {e}")
+            return None
+
+    def _fetch_chain_from_peers(self, peer_urls: List[str]):
+        if not peer_urls:
+            return None
+        print(f"📥 Initial sync from peers: {len(peer_urls)} candidates")
+        for peer_url in peer_urls:
+            try:
+                data = self._fetch_chain_from_base(peer_url)
+                if data:
+                    print(f"✅ Downloaded blockchain from peer: {peer_url}")
+                    return data
+            except Exception:
+                continue
+        print("❌ Peer sync failed")
+        return None
+
+    def _fetch_chain_from_base(self, base_url: str) -> Optional[Dict]:
+        endpoints = [
+            f"{base_url}/blockchain",
+            f"{base_url}/api/blockchain/full",
+        ]
+        for url in endpoints:
+            response = requests.get(url, timeout=30)
             if response.status_code == 200:
                 blockchain_data = response.json()
-                print(f"✅ Downloaded blockchain: {len(blockchain_data.get('blocks', []))} blocks")
+                if isinstance(blockchain_data, list):
+                    print(f"✅ Downloaded blockchain: {len(blockchain_data)} blocks")
+                    return {"blocks": blockchain_data}
+                print(
+                    f"✅ Downloaded blockchain: {len(blockchain_data.get('blocks', []))} blocks"
+                )
                 return blockchain_data
-            
-        except Exception as e:
-            print(f"❌ Initial sync failed: {e}")
-            return None
+        return None
     
     def _register_with_primary(self):
         """Register this node with the primary daemon"""
@@ -176,7 +233,7 @@ class P2PClient:
         """Sync new blocks and transactions from peers"""
         for peer in self.peers[:5]:  # Sync with first 5 peers
             try:
-                peer_url = peer.get('url')
+                peer_url = peer.get('url') or peer.get('peer_url')
                 if not peer_url:
                     continue
                 
@@ -233,7 +290,7 @@ class P2PClient:
         """Broadcast new block to peers"""
         for peer in self.peers:
             try:
-                peer_url = peer.get('url')
+                peer_url = peer.get('url') or peer.get('peer_url')
                 if peer_url:
                     requests.post(
                         f"{peer_url}/api/blocks/new",
@@ -247,7 +304,7 @@ class P2PClient:
         """Broadcast new transaction to peers"""
         for peer in self.peers:
             try:
-                peer_url = peer.get('url')
+                peer_url = peer.get('url') or peer.get('peer_url')
                 if peer_url:
                     requests.post(
                         f"{peer_url}/api/transactions/new",
@@ -333,8 +390,9 @@ class HybridBlockchainClient:
                 timeout=5
             )
             return response.status_code == 200 and response.json().get('valid', False)
-        except:
-            return False
+        except Exception:
+            print("⚠️  Primary validation unavailable; accepting P2P block as unverified")
+            return True
     
     def _validate_transaction_with_primary(self, transaction: Dict) -> bool:
         """Validate transaction against primary node"""
@@ -345,8 +403,9 @@ class HybridBlockchainClient:
                 timeout=5
             )
             return response.status_code == 200 and response.json().get('valid', False)
-        except:
-            return False
+        except Exception:
+            print("⚠️  Primary validation unavailable; accepting P2P transaction as unverified")
+            return True
     
     def broadcast_block(self, block: Dict):
         """Broadcast block to P2P network"""

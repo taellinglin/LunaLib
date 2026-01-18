@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="lunalib",
-    version="1.9.1",
+    version="1.9.3",
     author="Ling Lin",
     author_email="",
     description="Cryptocurrency Ecosystem library (LunaLib)",

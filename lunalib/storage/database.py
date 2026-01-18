@@ -1,4 +1,5 @@
 import os
+import sys
 if sys.platform != "emscripten":
     import sqlite3
 else:
@@ -6,7 +7,6 @@ else:
 import json
 import time
 from typing import Dict, List, Optional, Any
-import sys
 from .indexeddb import IndexedDBStore
 
 # --- Unicode-safe print for Windows console ---
@@ -17,11 +17,53 @@ def safe_print(*args, **kwargs):
         encoding = getattr(sys.stdout, 'encoding', 'utf-8')
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 
+
+def get_default_wallet_dir() -> str:
+    """Resolve a writable default wallet directory across platforms."""
+    if sys.platform == "emscripten":
+        return "."
+
+    if os.name == "nt":
+        base = os.getenv("APPDATA") or os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "LunaLib")
+
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "LunaLib")
+
+    # Mobile (best-effort) + Linux/Unix
+    android_base = os.getenv("ANDROID_APP_STORAGE") or os.getenv("ANDROID_DATA")
+    if android_base:
+        return os.path.join(android_base, "LunaLib")
+
+    xdg_base = os.getenv("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(xdg_base, "LunaLib")
+
+
+def resolve_wallet_db_path(db_path: Optional[str] = None) -> str:
+    """Resolve database path with backward-compatible fallbacks."""
+    if db_path:
+        return db_path
+
+    default_dir = get_default_wallet_dir()
+    default_path = os.path.join(default_dir, "wallets.db")
+
+    legacy_candidates = [
+        os.path.join(os.path.expanduser("~"), ".luna_wallet", "wallet.db"),
+        os.path.join(os.path.expanduser("~"), ".luna_wallet", "wallets.db"),
+        os.path.expanduser("~/.lunawallet/wallets.db"),
+    ]
+
+    for candidate in legacy_candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return default_path
+
 class WalletDatabase:
     """Manages wallet data storage"""
     
     def __init__(self, db_path=None):
-        self.db_path = db_path or os.path.join(os.path.expanduser("~"), ".luna_wallet", "wallets.db")
+        self.db_path = resolve_wallet_db_path(db_path)
         self._use_indexeddb = sys.platform == "emscripten"
         self._idb = None
         if not self._use_indexeddb:
