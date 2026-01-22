@@ -264,6 +264,14 @@ class MempoolManager:
                             headers=headers,
                             timeout=10
                         )
+                        if response.status_code == 400:
+                            headers.pop('Content-Encoding', None)
+                            response = self._session.post(
+                                broadcast_endpoint,
+                                json=transaction,
+                                headers=headers,
+                                timeout=10
+                            )
                     else:
                         response = self._session.post(
                             broadcast_endpoint,
@@ -328,18 +336,19 @@ class MempoolManager:
 
         accepted = 0
         payload = {"transactions": transactions}
+        use_gzip = bool(int(os.getenv("LUNALIB_HTTP_GZIP", "1")))
         if self.use_msgpack:
             raw = msgpack.packb(payload, use_bin_type=True)
             headers = {"Content-Type": "application/msgpack"}
+        else:
+            raw = json.dumps(payload).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+
+        if use_gzip:
             gz = gzip.compress(raw)
             headers["Content-Encoding"] = "gzip"
         else:
-            raw = json.dumps(payload).encode("utf-8")
-            gz = gzip.compress(raw)
-            headers = {
-                "Content-Type": "application/json",
-                "Content-Encoding": "gzip",
-            }
+            gz = raw
         start = time.perf_counter()
 
         def _post(endpoint: str) -> int:
@@ -348,6 +357,11 @@ class MempoolManager:
                 response = self._session.post(batch_endpoint, data=gz, headers=headers, timeout=10)
                 if response.status_code in [200, 201]:
                     return int(response.json().get("accepted", 0))
+                if response.status_code == 400 and use_gzip:
+                    plain_headers = {"Content-Type": headers.get("Content-Type", "application/json")}
+                    response = self._session.post(batch_endpoint, data=raw, headers=plain_headers, timeout=10)
+                    if response.status_code in [200, 201]:
+                        return int(response.json().get("accepted", 0))
             except Exception:
                 pass
             return 0
@@ -451,14 +465,19 @@ class MempoolManager:
                     if isinstance(data, list):
                         for tx in data:
                             tx_hash = tx.get('hash')
-                            if tx_hash and tx_hash not in self.local_mempool and tx_hash not in self.confirmed_transactions:
-                                self.local_mempool[tx_hash] = {
-                                    'transaction': tx,
-                                    'timestamp': time.time(),
-                                    'broadcast_attempts': 0,
-                                    'last_broadcast': 0
-                                }
-                                self._index_tx(tx_hash, tx)
+                            if not tx_hash:
+                                continue
+                            if tx_hash in self.local_mempool or tx_hash in self.confirmed_transactions:
+                                continue
+                            if not self._validate_transaction_basic(tx):
+                                continue
+                            self.local_mempool[tx_hash] = {
+                                'transaction': tx,
+                                'timestamp': time.time(),
+                                'broadcast_attempts': 0,
+                                'last_broadcast': 0
+                            }
+                            self._index_tx(tx_hash, tx)
                 else:
                     print(f"DEBUG: Remote mempool fetch HTTP {resp.status_code}: {resp.text}")
             except Exception as e:
@@ -553,13 +572,52 @@ class MempoolManager:
     
     def _validate_transaction_basic(self, transaction: Dict) -> bool:
         """Basic transaction validation"""
-        required_fields = ['type', 'from', 'to', 'amount', 'timestamp', 'hash']
-        
+        # Normalize common alias fields
+        if 'to' not in transaction:
+            if 'receiver' in transaction:
+                transaction['to'] = transaction.get('receiver')
+            elif 'issued_to' in transaction:
+                transaction['to'] = transaction.get('issued_to')
+            elif 'owner_address' in transaction:
+                transaction['to'] = transaction.get('owner_address')
+            elif 'to_address' in transaction:
+                transaction['to'] = transaction.get('to_address')
+            elif 'destination' in transaction:
+                transaction['to'] = transaction.get('destination')
+        if 'amount' not in transaction:
+            if 'value' in transaction:
+                transaction['amount'] = transaction.get('value')
+            elif 'denomination' in transaction:
+                transaction['amount'] = transaction.get('denomination')
+            elif 'quantity' in transaction:
+                transaction['amount'] = transaction.get('quantity')
+            elif 'transfer_amount' in transaction:
+                transaction['amount'] = transaction.get('transfer_amount')
+        if 'from' not in transaction:
+            if 'sender' in transaction:
+                transaction['from'] = transaction.get('sender')
+            elif 'from_address' in transaction:
+                transaction['from'] = transaction.get('from_address')
+            elif 'source' in transaction:
+                transaction['from'] = transaction.get('source')
+
+        tx_type = (transaction.get("type") or "").lower()
+        if tx_type in ("reward", "gtx_genesis", "genesis_bill"):
+            required_fields = ['type', 'to', 'amount', 'timestamp', 'hash']
+        else:
+            required_fields = ['type', 'from', 'to', 'amount', 'timestamp', 'hash']
+
         for field in required_fields:
             if field not in transaction:
                 print(f"DEBUG: Missing required field: {field}")
                 return False
         
+        # Validate hash format
+        tx_hash = str(transaction.get('hash', '')).lower()
+        if len(tx_hash) != 64 or any(ch not in "0123456789abcdef" for ch in tx_hash):
+            print("DEBUG: Invalid transaction hash format")
+            return False
+
         # Validate amount
         try:
             amount = float(transaction['amount'])
@@ -583,14 +641,12 @@ class MempoolManager:
         # Validate addresses (basic format check)
         from_addr = transaction.get('from', '')
         to_addr = transaction.get('to', '')
-        
-        if not from_addr or not to_addr:
-            print("DEBUG: Missing from or to address")
-            return False
 
-        # Early reject: address format + signature/public key for transfers
         tx_type = (transaction.get("type") or "").lower()
         if tx_type in ("transfer", "transaction"):
+            if not from_addr or not to_addr:
+                print("DEBUG: Missing from or to address")
+                return False
             if not from_addr.startswith("LUN_") or not to_addr.startswith("LUN_"):
                 print("DEBUG: Invalid address format")
                 return False
@@ -601,6 +657,10 @@ class MempoolManager:
                 return False
             if len(signature) != 128:
                 print("DEBUG: Invalid signature length")
+                return False
+        else:
+            if not to_addr:
+                print("DEBUG: Missing to address")
                 return False
         
         print(f"✅ Transaction validation passed: {transaction.get('type')} from {from_addr} to {to_addr}")

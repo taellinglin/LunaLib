@@ -15,6 +15,7 @@ def safe_print(*args, **kwargs):
     else:
         print_info(msg)
 import hashlib
+from lunalib.utils.hash import sm3_hex
 from typing import Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -333,7 +334,7 @@ class TransactionSecurity:
         import json
         signing = json.dumps(tx_copy, sort_keys=True, separators=(',', ':'))
         transaction["_signing_data"] = signing
-        transaction["_signing_hash"] = hashlib.sha256(signing.encode()).hexdigest()
+        transaction["_signing_hash"] = sm3_hex(signing.encode())
         return signing
     
     def _validate_mining_proof(self, transaction: Dict) -> bool:

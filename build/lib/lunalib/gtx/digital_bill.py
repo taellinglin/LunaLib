@@ -5,24 +5,16 @@ def safe_print(*args, **kwargs):
         print(*args, **kwargs)
     except UnicodeEncodeError:
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
-safe_print("Warning: cryptography library not available. Using fallback methods.")
 import time
 import hashlib
+from lunalib.utils.hash import sm3_hex
 import secrets
 import json
 import base64
 from typing import Dict, Optional
 
-try:
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import rsa, padding
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.exceptions import InvalidSignature
-    CRYPTOGRAPHY_AVAILABLE = True
-except ImportError:
-    safe_print("Warning: cryptography library not available. Using fallback methods.")
-    CRYPTOGRAPHY_AVAILABLE = False
-
+from ..core.crypto import KeyManager
+from ..core.sm2 import SM2
 from .bill_registry import BillRegistry
 
 class DigitalBill:
@@ -49,6 +41,8 @@ class DigitalBill:
         self.issued_to = user_address
         self.public_key = public_key
         self.signature = signature
+        self._sm2 = SM2()
+        self._key_manager = KeyManager()
     
     def _generate_serial(self):
         """Generate unique bill serial number"""
@@ -65,7 +59,7 @@ class DigitalBill:
             "timestamp": self.created_time,
             "bill_serial": self.bill_serial
         }
-        return hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()
+        return sm3_hex(json.dumps(metadata, sort_keys=True).encode())
     
     def get_mining_data(self, nonce):
         """Get data for mining computation"""
@@ -131,7 +125,7 @@ class DigitalBill:
     def _get_previous_hash(self):
         """Get hash of previous genesis transaction"""
         # In production, this would query the blockchain
-        return hashlib.sha256(str(time.time()).encode()).hexdigest()
+        return sm3_hex(str(time.time()).encode())
     
     # Signature methods from your signatures.py
     def to_dict(self):
@@ -149,48 +143,31 @@ class DigitalBill:
     def calculate_hash(self):
         """Calculate SHA-256 hash of the bill data"""
         bill_string = json.dumps(self.to_dict(), sort_keys=True)
-        return hashlib.sha256(bill_string.encode()).hexdigest()
+        return sm3_hex(bill_string.encode())
     
     def sign(self, private_key):
         """Sign the bill data with a private key"""
-        if not CRYPTOGRAPHY_AVAILABLE:
-            return self._sign_fallback(private_key)
-            
         bill_hash = self.calculate_hash()
         
         try:
-            # Load private key if it's in string format
-            if isinstance(private_key, str):
-                private_key_obj = serialization.load_pem_private_key(
-                    private_key.encode('utf-8'),
-                    password=None
-                )
-            else:
-                private_key_obj = private_key
-            
-            # Sign the hash
-            signature = private_key_obj.sign(
-                bill_hash.encode(),
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
-                hashes.SHA256()
-            )
-            
-            self.signature = base64.b64encode(signature).decode('utf-8')
-            
-            # Set public key
-            public_key = private_key_obj.public_key()
-            public_pem = public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            )
-            self.public_key = public_pem.decode('utf-8')
-            
+            private_key_hex = None
+            if isinstance(private_key, bytes):
+                private_key_hex = private_key.decode("utf-8")
+            elif isinstance(private_key, str):
+                private_key_hex = private_key
+
+            if not private_key_hex or len(private_key_hex) != 64:
+                return self._sign_fallback(private_key)
+
+            signature = self._sm2.sign(bill_hash.encode(), private_key_hex)
+            self.signature = signature
+
+            # Set public key derived from private key
+            self.public_key = self._key_manager.derive_public_key(private_key_hex)
+
             return self.signature
         except Exception as e:
-            safe_print(f"Cryptographic signing failed, using fallback: {e}")
+            safe_print(f"SM2 signing failed, using fallback: {e}")
             return self._sign_fallback(private_key)
     
     def _sign_fallback(self, private_key):
@@ -202,11 +179,11 @@ class DigitalBill:
         else:
             signature_input = f"fallback_key{bill_hash}"
         
-        self.signature = hashlib.sha256(signature_input.encode()).hexdigest()
+        self.signature = sm3_hex(signature_input.encode())
         
         # Set fallback public key
         if isinstance(private_key, str) and len(private_key) > 32:
-            self.public_key = hashlib.sha256(private_key.encode()).hexdigest()
+            self.public_key = sm3_hex(private_key.encode())
         else:
             self.public_key = "fallback_public_key"
         
@@ -226,15 +203,29 @@ class DigitalBill:
         
         # Handle fallback signatures
         if self.public_key == 'fallback_public_key':
-            expected_fallback = hashlib.sha256(
+            expected_fallback = sm3_hex(
                 f"{self.issued_to}{self.denomination}{self.front_serial}{self.timestamp}".encode()
-            ).hexdigest()
+            )
             return self.signature == expected_fallback
         
+        # Prefer SM2 verification when key/signature formats match
+        if (
+            isinstance(self.public_key, str)
+            and isinstance(self.signature, str)
+            and self.public_key.startswith("04")
+            and len(self.public_key) == 130
+            and len(self.signature) == 128
+        ):
+            bill_hash = self.calculate_hash()
+            try:
+                return self._sm2.verify(bill_hash.encode(), self.signature, self.public_key)
+            except Exception:
+                pass
+
         # Handle metadata_hash based signatures
         if self.metadata_hash:
             verification_data = f"{self.public_key}{self.metadata_hash}"
-            expected_signature = hashlib.sha256(verification_data.encode()).hexdigest()
+            expected_signature = sm3_hex(verification_data.encode())
             return self.signature == expected_signature
         
         # Final fallback - accept any signature that looks valid
@@ -242,31 +233,10 @@ class DigitalBill:
     
     @staticmethod
     def generate_key_pair():
-        """Generate a new RSA key pair for signing"""
-        if not CRYPTOGRAPHY_AVAILABLE:
-            return DigitalBill._generate_fallback_key_pair()
-            
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
-        
-        # Get public key
-        public_key = private_key.public_key()
-        
-        # Serialize keys
-        private_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        
-        public_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        return private_pem.decode('utf-8'), public_pem.decode('utf-8')
+        """Generate a new SM2 key pair for signing"""
+        sm2 = SM2()
+        private_key, public_key = sm2.generate_keypair()
+        return private_key, public_key
     
     @staticmethod
     def _generate_fallback_key_pair():
@@ -276,6 +246,6 @@ class DigitalBill:
         
         # Generate random strings as "keys"
         private_key = ''.join(random.choices(string.ascii_letters + string.digits, k=64))
-        public_key = hashlib.sha256(private_key.encode()).hexdigest()
+        public_key = sm3_hex(private_key.encode())
         
         return private_key, public_key

@@ -1,7 +1,16 @@
 import time
 import hashlib
+from lunalib.utils.hash import sm3_hex
 import secrets
 import json
+import sys
+
+def safe_print(*args, **kwargs):
+    encoding = sys.stdout.encoding or 'utf-8'
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 from typing import Dict, List, Optional
 from .digital_bill import DigitalBill
 from .bill_registry import BillRegistry
@@ -86,7 +95,7 @@ class GTXGenesis:
             # METHOD 2: Check hash of public_key + metadata_hash
             elif signature_valid is None and metadata_hash and public_key and signature:
                 verification_data = f"{public_key}{metadata_hash}"
-                expected_signature = hashlib.sha256(verification_data.encode()).hexdigest()
+                expected_signature = sm3_hex(verification_data.encode())
                 if signature == expected_signature:
                     signature_valid = True
                     verification_method = "metadata_hash_signature"
@@ -151,7 +160,7 @@ class GTXGenesis:
             # METHOD 4: Check simple concatenation hash
             elif signature_valid is None and signature:
                 simple_data = f"{front_serial}{denomination}{issued_to}{timestamp}"
-                expected_simple_hash = hashlib.sha256(simple_data.encode()).hexdigest()
+                expected_simple_hash = sm3_hex(simple_data.encode())
                 if signature == expected_simple_hash:
                     signature_valid = True
                     verification_method = "simple_hash"
@@ -168,7 +177,7 @@ class GTXGenesis:
                     'public_key': public_key
                 }
                 bill_json = json.dumps(bill_dict, sort_keys=True)
-                bill_json_hash = hashlib.sha256(bill_json.encode()).hexdigest()
+                bill_json_hash = sm3_hex(bill_json.encode())
                 if signature == bill_json_hash:
                     signature_valid = True
                     verification_method = "bill_json_hash"
@@ -331,7 +340,7 @@ class GTXGenesis:
             
             # Verify hash matches
             data_string = json.dumps(mining_data, sort_keys=True)
-            computed_hash = hashlib.sha256(data_string.encode()).hexdigest()
+            computed_hash = sm3_hex(data_string.encode())
             
             return computed_hash == bill_info['hash']
             

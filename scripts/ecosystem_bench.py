@@ -247,6 +247,8 @@ def main():
     parser.add_argument("--stress-broadcast", type=int, default=50)
     parser.add_argument("--mine-blocks", type=int, default=3)
     parser.add_argument("--mempool-burst", type=int, default=100)
+    parser.add_argument("--sign-workers", type=int, default=8)
+    parser.add_argument("--no-parallel-sign", action="store_true")
     args = parser.parse_args()
 
     stats = {
@@ -254,6 +256,7 @@ def main():
         "scan_chain_seconds": 0.0,
         "get_blocks_range_seconds": 0.0,
         "broadcast_single_seconds": 0.0,
+        "tx_sign_batch_seconds": 0.0,
         "stress_scan_seconds": 0.0,
         "stress_range_seconds": 0.0,
         "stress_broadcast_seconds": 0.0,
@@ -295,6 +298,13 @@ def main():
     stats["scan_chain_seconds"] = scan_elapsed
     print(f"[BENCH] scan_chain: {len(data.get('blocks', []))} blocks in {scan_elapsed:.4f}s")
 
+    print("[BENCH] reward scan...")
+    start = time.perf_counter()
+    reward_txs = manager.scan_transactions_for_address(args.miner)
+    reward_elapsed = time.perf_counter() - start
+    reward_count = sum(1 for tx in reward_txs if str(tx.get("type", "")).lower() == "reward" or str(tx.get("from", "")).lower() == "network")
+    print(f"[BENCH] reward scan: {reward_count} reward txs for {args.miner} in {reward_elapsed:.4f}s")
+
     print("[BENCH] get_blocks_range...")
     start = time.perf_counter()
     blocks = manager.get_blocks_range(0, min(10, args.blocks - 1))
@@ -305,7 +315,7 @@ def main():
     tm = TransactionManager(network_endpoints=[base_url])
     key_manager = KeyManager()
     priv_key, pub_key, from_addr = key_manager.generate_keypair()
-    tx = tm.create_transaction(from_addr, args.miner, 1.0, private_key=priv_key, memo="bench")
+    tx = tm.create_transaction(from_addr, args.miner, 1.0, private_key=priv_key, public_key=pub_key, memo="bench")
 
     print("[BENCH] broadcast_transaction...")
     start = time.perf_counter()
@@ -336,13 +346,24 @@ def main():
     print(f"[STRESS] get_blocks_range x{args.stress_iterations}: {elapsed:.4f}s")
 
     print("[STRESS] broadcast transactions (batched + parallel)...")
-    start = time.perf_counter()
     success_count = 0
     batch_size = 25
-    batches = []
-    for i in range(args.stress_broadcast):
-        tx = tm.create_transaction(from_addr, args.miner, 1.0, private_key=priv_key, memo=f"bench-{i}")
-        batches.append(tx)
+    batch_amounts = [1.0] * args.stress_broadcast
+
+    sign_start = time.perf_counter()
+    batches = tm.create_transactions_batch(
+        from_addr,
+        args.miner,
+        batch_amounts,
+        private_key=priv_key,
+        public_key=pub_key,
+        memo_prefix="bench-",
+        parallel_sign=not args.no_parallel_sign,
+        sign_workers=args.sign_workers,
+    )
+    stats["tx_sign_batch_seconds"] = time.perf_counter() - sign_start
+
+    start = time.perf_counter()
     batch_payloads = [
         {"transactions": batches[i : i + batch_size]}
         for i in range(0, len(batches), batch_size)
@@ -370,9 +391,19 @@ def main():
     start = time.perf_counter()
     burst_success = 0
     burst = []
-    for i in range(args.mempool_burst):
-        tx = tm.create_transaction(from_addr, args.miner, 0.1, private_key=priv_key, memo=f"burst-{i}")
-        burst.append(tx)
+    burst_amounts = [0.1] * args.mempool_burst
+    burst.extend(
+        tm.create_transactions_batch(
+            from_addr,
+            args.miner,
+            burst_amounts,
+            private_key=priv_key,
+            public_key=pub_key,
+            memo_prefix="burst-",
+            parallel_sign=not args.no_parallel_sign,
+            sign_workers=args.sign_workers,
+        )
+    )
     burst_payloads = [
         {"transactions": burst[i : i + batch_size]}
         for i in range(0, len(burst), batch_size)
@@ -417,18 +448,47 @@ def main():
     print(f"scan_chain: {stats['scan_chain_seconds']:.4f}s")
     print(f"get_blocks_range: {stats['get_blocks_range_seconds']:.4f}s")
     print(f"broadcast_single: {stats['broadcast_single_seconds']:.4f}s")
+    print(f"sign_batch: {stats['tx_sign_batch_seconds']:.4f}s")
+    if args.stress_broadcast:
+        print(
+            f"sign_batch avg: {stats['tx_sign_batch_seconds'] / args.stress_broadcast:.6f}s/tx "
+            f"| {args.stress_broadcast / max(stats['tx_sign_batch_seconds'], 1e-9):.2f} tx/s"
+        )
     print(f"stress scan x{args.stress_iterations}: {stats['stress_scan_seconds']:.4f}s")
     print(f"stress range x{args.stress_iterations}: {stats['stress_range_seconds']:.4f}s")
+    if args.stress_iterations:
+        print(
+            f"scan avg: {stats['stress_scan_seconds'] / args.stress_iterations:.6f}s/iter"
+        )
+        print(
+            f"range avg: {stats['stress_range_seconds'] / args.stress_iterations:.6f}s/iter"
+        )
     print(
         f"stress broadcast x{args.stress_broadcast}: {stats['stress_broadcast_seconds']:.4f}s "
         f"(success={stats['stress_broadcast_success']})"
     )
+    if args.stress_broadcast:
+        print(
+            f"stress broadcast avg: {stats['stress_broadcast_seconds'] / args.stress_broadcast:.6f}s/tx "
+            f"| {args.stress_broadcast / max(stats['stress_broadcast_seconds'], 1e-9):.2f} tx/s"
+        )
     print(
         f"mempool burst x{args.mempool_burst}: {stats['mempool_burst_seconds']:.4f}s "
         f"(success={stats['mempool_burst_success']})"
     )
+    if args.mempool_burst:
+        print(
+            f"mempool burst avg: {stats['mempool_burst_seconds'] / args.mempool_burst:.6f}s/tx "
+            f"| {args.mempool_burst / max(stats['mempool_burst_seconds'], 1e-9):.2f} tx/s"
+        )
     print(f"mined blocks: {stats['mined_blocks']} in {stats['mining_seconds']:.4f}s")
+    if stats['mined_blocks']:
+        print(
+            f"mining avg: {stats['mining_seconds'] / stats['mined_blocks']:.6f}s/block "
+            f"| {stats['mined_blocks'] / max(stats['mining_seconds'], 1e-9):.2f} blocks/s"
+        )
     print(f"mempool size: {len(mempool)}")
+    print(f"chain height: {len(chain) - 1}")
     mempool_stats = mempool_manager.get_stats() if hasattr(mempool_manager, "get_stats") else {}
     daemon_stats = daemon.get_stats() if hasattr(daemon, "get_stats") else {}
     if mempool_stats:

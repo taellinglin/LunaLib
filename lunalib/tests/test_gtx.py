@@ -9,6 +9,7 @@ import pytest
 from lunalib.gtx.genesis import GTXGenesis
 from lunalib.gtx.digital_bill import DigitalBill
 import time
+from lunalib.utils.hash import sm3_hex
 class TestGTXGenesis:
     def test_digital_bill_creation(self, test_gtx):
         """Test digital bill creation"""
@@ -51,7 +52,6 @@ class TestGTXGenesis:
     def test_bill_verification(self, test_gtx, temp_dir):
         """Test bill verification with proper bill data structure"""
         import time
-        import hashlib
         from unittest.mock import patch
 
         # Create a complete bill_info structure that matches what register_bill expects
@@ -61,7 +61,7 @@ class TestGTXGenesis:
         user_address = "LUN_test_verify"
 
         # Create metadata that will pass one of the verification methods
-        metadata_hash = hashlib.sha256(f"test_metadata_{timestamp}".encode()).hexdigest()
+        metadata_hash = sm3_hex(f"test_metadata_{timestamp}".encode())
         public_key = f"pub_test_key_{timestamp}"
         signature = metadata_hash  # This will pass METHOD 1 verification
 
@@ -70,7 +70,7 @@ class TestGTXGenesis:
             'bill_serial': bill_serial,
             'denomination': denomination,
             'user_address': user_address,
-            'hash': hashlib.sha256(bill_serial.encode()).hexdigest(),
+            'hash': sm3_hex(bill_serial.encode()),
             'mining_time': 1.5,
             'difficulty': 4,
             'luna_value': denomination,

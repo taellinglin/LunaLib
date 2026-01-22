@@ -9,13 +9,16 @@ from .gtx.genesis import GTXGenesis
 from .transactions.transactions import TransactionManager
 from .core.blockchain import BlockchainManager
 from .core.mempool import MempoolManager
+from .core.wallet_manager import WalletStateManager, get_wallet_manager
 
-__version__ = "1.1.8"
+__version__ = "2.2.3"
 __all__ = [
     'LunaWallet', 
     'GenesisMiner', 
     'GTXGenesis', 
     'TransactionManager',
     'BlockchainManager',
-    'MempoolManager'
+    'MempoolManager',
+    'WalletStateManager',
+    'get_wallet_manager'
 ]

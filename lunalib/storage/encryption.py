@@ -10,9 +10,9 @@ def safe_print(*args, **kwargs):
         encoding = getattr(sys.stdout, 'encoding', 'utf-8')
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import base64
-import hashlib
 import hmac
 from typing import Dict, Optional
+from lunalib.utils.hash import derive_key_sm3, hmac_sm3
 class EncryptionManager:
     """Handles encryption and decryption of sensitive data"""
     
@@ -68,21 +68,15 @@ class EncryptionManager:
             return None
     
     def _derive_key(self, password: str) -> bytes:
-        """Derive encryption key from password"""
-        return hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode(),
-            self.salt,
-            100000,
-            dklen=32,
-        )
+        """Derive encryption key from password using SM3"""
+        return derive_key_sm3(password, self.salt, iterations=100000, dklen=32)
 
     def _keystream(self, key: bytes, nonce: bytes, length: int) -> bytes:
         output = bytearray()
         counter = 0
         while len(output) < length:
             counter_bytes = counter.to_bytes(4, "big")
-            output.extend(hmac.new(key, nonce + counter_bytes, hashlib.sha256).digest())
+            output.extend(hmac_sm3(key, nonce + counter_bytes))
             counter += 1
         return bytes(output[:length])
 
@@ -91,19 +85,19 @@ class EncryptionManager:
         nonce = os.urandom(16)
         stream = self._keystream(key, nonce, len(plaintext))
         ciphertext = bytes(a ^ b for a, b in zip(plaintext, stream))
-        mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-        token = b"EL1" + nonce + ciphertext + mac
+        mac = hmac_sm3(key, nonce + ciphertext)
+        token = b"EL3" + nonce + ciphertext + mac
         return base64.urlsafe_b64encode(token).decode()
 
     def _decrypt_bytes(self, token: str, password: str) -> bytes:
         key = self._derive_key(password)
         raw = base64.urlsafe_b64decode(token.encode())
-        if not raw.startswith(b"EL1"):
+        if not raw.startswith(b"EL3"):
             raise ValueError("Unsupported encryption format")
         nonce = raw[3:19]
         mac = raw[-32:]
         ciphertext = raw[19:-32]
-        expected_mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+        expected_mac = hmac_sm3(key, nonce + ciphertext)
         if not hmac.compare_digest(mac, expected_mac):
             raise ValueError("Invalid password or corrupted data")
         stream = self._keystream(key, nonce, len(ciphertext))
@@ -116,13 +110,13 @@ class EncryptionManager:
             if not token:
                 return False
             raw = base64.urlsafe_b64decode(token.encode())
-            if not raw.startswith(b"EL1"):
+            if not raw.startswith(b"EL3"):
                 return False
             nonce = raw[3:19]
             mac = raw[-32:]
             ciphertext = raw[19:-32]
             key = self._derive_key(password)
-            expected_mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+            expected_mac = hmac_sm3(key, nonce + ciphertext)
             return hmac.compare_digest(mac, expected_mac)
         except:
             return False

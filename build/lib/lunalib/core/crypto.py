@@ -1,12 +1,17 @@
 import hashlib
 import secrets
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
+from concurrent.futures import ThreadPoolExecutor
 from ..core.sm2 import SM2 # Assuming an SM2 implementation is available
+from lunalib.utils.hash import sm3_hex
 class KeyManager:
     """Manages cryptographic keys and signing using SM2"""
     
     def __init__(self):
         self.sm2 = SM2()  # SM2 instance for cryptographic operations
+        self._public_key_cache: dict[str, str] = {}
+        self._address_cache: dict[str, str] = {}
+        self._signing_key_cache: dict[tuple[str, str], str] = {}
     
     def generate_keypair(self) -> Tuple[str, str, str]:
         """
@@ -41,9 +46,13 @@ class KeyManager:
         IMPORTANT: SM2 public key should be 130 characters: '04' + 64-byte x + 64-byte y
         """
         try:
+            cached = self._public_key_cache.get(private_key_hex)
+            if cached:
+                return cached
+
             print(f"[KEYMANAGER] Deriving public key from private key...")
             print(f"[KEYMANAGER] Private key: {private_key_hex[:16]}...")
-            
+
             # Try to use the SM2 instance
             if hasattr(self.sm2, 'generate_keypair'):
                 # This is a hack: generate a new keypair and replace the private key
@@ -56,24 +65,31 @@ class KeyManager:
                 
                 public_key = f"04{Px:064x}{Py:064x}"
                 print(f"[KEYMANAGER] Generated full public key: {public_key[:24]}... (length: {len(public_key)})")
+                self._public_key_cache[private_key_hex] = public_key
                 return public_key
             else:
                 # Fallback
                 print(f"[KEYMANAGER] Using fallback public key generation")
                 # Generate a deterministic but invalid public key for testing
-                hash1 = hashlib.sha256(private_key_hex.encode()).hexdigest()
-                hash2 = hashlib.sha256(hash1.encode()).hexdigest()
-                return f"04{hash1}{hash2}"  # 130 chars
+                hash1 = sm3_hex(private_key_hex.encode())
+                hash2 = sm3_hex(hash1.encode())
+                public_key = f"04{hash1}{hash2}"  # 130 chars
+                self._public_key_cache[private_key_hex] = public_key
+                return public_key
         except Exception as e:
             print(f"[KEYMANAGER ERROR] Error deriving public key: {e}")
             # Emergency fallback - generate a full 130-char key
             import secrets
             random_part = secrets.token_hex(64)  # 128 chars
-            return f"04{random_part}"  # 130 chars total
+            public_key = f"04{random_part}"  # 130 chars total
+            self._public_key_cache[private_key_hex] = public_key
+            return public_key
         except Exception as e:
             print(f"DEBUG: Error deriving public key: {e}")
             # Fallback to hash-based method
-            return f"04{hashlib.sha256(private_key_hex.encode()).hexdigest()}"
+            public_key = f"04{sm3_hex(private_key_hex.encode())}"
+            self._public_key_cache[private_key_hex] = public_key
+            return public_key
     
     def derive_address(self, public_key_hex: str) -> str:
         """
@@ -86,16 +102,24 @@ class KeyManager:
             Address string with LUN_ prefix
         """
         try:
+            cached = self._address_cache.get(public_key_hex)
+            if cached:
+                return cached
+
             # Use SM2's address generation
-            return self.sm2.public_key_to_address(public_key_hex)
+            address = self.sm2.public_key_to_address(public_key_hex)
+            self._address_cache[public_key_hex] = address
+            return address
         except Exception as e:
             print(f"DEBUG: Error deriving address: {e}")
             # Fallback method
             if not public_key_hex.startswith('04'):
                 public_key_hex = f"04{public_key_hex}"
             
-            address_hash = hashlib.sha256(public_key_hex.encode()).hexdigest()
-            return f"LUN_{address_hash[:16]}_{secrets.token_hex(4)}"
+            address_hash = sm3_hex(public_key_hex.encode())
+            address = f"LUN_{address_hash[:16]}_{secrets.token_hex(4)}"
+            self._address_cache[public_key_hex] = address
+            return address
     
     def sign_data(self, data: str, private_key_hex: str) -> str:
         """
@@ -109,15 +133,22 @@ class KeyManager:
             SM2 signature in hex format
         """
         try:
+            cached = self._signing_key_cache.get((private_key_hex, data))
+            if cached:
+                return cached
+
             # Use SM2 signing
             signature = self.sm2.sign(data.encode('utf-8'), private_key_hex)
             print(f"DEBUG: Signed data with SM2, signature: {signature[:16]}...")
+            self._signing_key_cache[(private_key_hex, data)] = signature
             return signature
         except Exception as e:
             print(f"DEBUG: SM2 signing failed: {e}, using fallback")
             # Fallback to simplified signing
             sign_string = data + private_key_hex
-            return hashlib.sha256(sign_string.encode()).hexdigest()
+            signature = sm3_hex(sign_string.encode())
+            self._signing_key_cache[(private_key_hex, data)] = signature
+            return signature
     
     def verify_signature(self, data: str, signature: str, public_key_hex: str) -> bool:
         """
@@ -140,6 +171,35 @@ class KeyManager:
             print(f"DEBUG: SM2 verification failed: {e}, using fallback")
             # Fallback verification (always returns True for compatibility)
             return True
+
+    def verify_signatures_batch(
+        self,
+        messages: List[str],
+        signatures: List[str],
+        public_keys: List[str],
+        max_workers: int = 8,
+    ) -> List[bool]:
+        """Verify a batch of SM2 signatures in parallel."""
+        def _verify(args):
+            msg, sig, pub = args
+            return self.verify_signature(msg, sig, pub)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            return list(pool.map(_verify, zip(messages, signatures, public_keys)))
+
+    def sign_data_batch(self, messages: List[str], private_key_hex: str, max_workers: int = 8) -> List[str]:
+        """Sign a batch of messages in parallel."""
+        if not messages:
+            return []
+
+        def _sign(msg: str) -> str:
+            return self.sign_data(msg, private_key_hex)
+
+        if max_workers and max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                return list(pool.map(_sign, messages))
+
+        return [_sign(msg) for msg in messages]
     
     def validate_key_pair(self, private_key_hex: str, public_key_hex: str) -> bool:
         """

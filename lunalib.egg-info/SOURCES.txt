@@ -10,6 +10,7 @@ lunalib/.gitignore
 lunalib/__init__.py
 lunalib/cli.py
 lunalib/luna_lib.py
+lunalib/wallet_manager.py
 lunalib.egg-info/PKG-INFO
 lunalib.egg-info/SOURCES.txt
 lunalib.egg-info/dependency_links.txt
@@ -24,6 +25,8 @@ lunalib/core/daemon_server.py
 lunalib/core/mempool.py
 lunalib/core/p2p.py
 lunalib/core/sm2.py
+lunalib/core/sm3.py
+lunalib/core/sm4.py
 lunalib/core/wallet.py
 lunalib/core/wallet_db.py
 lunalib/core/wallet_manager.py
@@ -88,3 +91,4 @@ lunalib/transactions/__pycache__/transactions.cpython-310.pyc
 lunalib/transactions/__pycache__/validator.cpython-310.pyc
 lunalib/utils/__init__.py
 lunalib/utils/console.py
+lunalib/utils/hash.py

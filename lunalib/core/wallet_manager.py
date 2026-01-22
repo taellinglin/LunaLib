@@ -11,6 +11,7 @@ real-time updates available to the UI.
 import threading
 import time
 import os
+import re
 from collections import deque
 from typing import Dict, List, Optional, Callable, Set, Tuple
 from dataclasses import dataclass, field, asdict
@@ -190,6 +191,27 @@ class WalletStateManager:
     def _addresses_match(self, addr1: str, addr2: str) -> bool:
         """Check if two addresses match (after normalization)"""
         return self._normalize_address(addr1) == self._normalize_address(addr2)
+
+    def _parse_amount(self, value, default: float = 0.0) -> float:
+        """Parse numeric amounts that may include unit suffixes like '3.0JS:3'."""
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return default
+        try:
+            return float(value)
+        except Exception:
+            text = str(value)
+            match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)
+            if match:
+                try:
+                    return float(match.group(0))
+                except Exception:
+                    return default
+        return default
     
     # =========================================================================
     # Wallet management
@@ -234,7 +256,7 @@ class WalletStateManager:
         tx_type_lower = (tx.type or '').lower()
         
         # Categorize by type
-        if tx_type_lower == 'reward' or tx.from_address == 'network':
+        if (tx_type_lower == 'reward' or tx.from_address == 'network') and self._addresses_match(tx.to_address, address):
             categories.append('rewards')
         elif tx_type_lower == 'gtx_genesis':
             categories.append('genesis_transactions')
@@ -253,7 +275,7 @@ class WalletStateManager:
         tx_type_lower = (tx.type or '').lower()
         
         # Categorize by type
-        if tx_type_lower == 'reward':
+        if tx_type_lower == 'reward' and self._addresses_match(tx.to_address, address):
             categories.append('rewards')
         elif tx_type_lower == 'gtx_genesis':
             categories.append('genesis_transactions')
@@ -298,8 +320,8 @@ class WalletStateManager:
                         type=raw_tx.get('type', 'transfer'),
                         from_address=raw_tx.get('from', ''),
                         to_address=raw_tx.get('to', ''),
-                        amount=float(raw_tx.get('amount', 0)),
-                        fee=float(raw_tx.get('fee', 0)),
+                        amount=self._parse_amount(raw_tx.get('amount', 0)),
+                        fee=self._parse_amount(raw_tx.get('fee', 0)),
                         timestamp=int(raw_tx.get('timestamp', 0)),
                         status=TransactionStatus.CONFIRMED.value,
                         block_height=raw_tx.get('block_height'),
@@ -359,8 +381,8 @@ class WalletStateManager:
                         type=raw_tx.get('type', 'transfer'),
                         from_address=raw_tx.get('from', ''),
                         to_address=raw_tx.get('to', ''),
-                        amount=float(raw_tx.get('amount', 0)),
-                        fee=float(raw_tx.get('fee', 0)),
+                        amount=self._parse_amount(raw_tx.get('amount', 0)),
+                        fee=self._parse_amount(raw_tx.get('fee', 0)),
                         timestamp=int(raw_tx.get('timestamp', 0)),
                         status=TransactionStatus.PENDING.value,
                         memo=raw_tx.get('memo', ''),
@@ -404,7 +426,7 @@ class WalletStateManager:
             elif self._addresses_match(tx.to_address, address):
                 # Incoming: add amount
                 confirmed_balance += tx.amount
-            elif tx.type == 'reward' or tx.from_address == 'network':
+            elif (tx.type == 'reward' or tx.from_address == 'network') and self._addresses_match(tx.to_address, address):
                 # Reward received
                 confirmed_balance += tx.amount
         

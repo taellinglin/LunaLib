@@ -118,3 +118,35 @@ pytest -q
 
 - Prefer the primary node for validation, but allow P2P fallback for availability.
 - For purely decentralized setups, use `prefer_peers=True` and provide seed peers.
+
+## Environment Flags
+
+Set these with standard environment variable mechanisms (e.g., PowerShell `$env:NAME="value"`).
+
+### Networking / Serialization
+
+- `LUNALIB_HTTP_GZIP` (default: `1`) — Enable gzip for HTTP payloads where supported.
+- `LUNALIB_P2P_GZIP` (default: `1`) — Enable gzip for P2P traffic.
+- `LUNALIB_USE_MSGPACK` (default: `0`) — Use msgpack when available.
+- `LUNALIB_BLOCK_SUBMIT_TIMEOUT` (default: `30`) — Submit timeout (seconds).
+- `LUNALIB_SUBMIT_CONFIRM_RETRIES` (default: `3`) — Post-submit confirmation retries.
+- `LUNALIB_SUBMIT_CONFIRM_DELAY` (default: `1.0`) — Delay between confirmation retries (seconds).
+
+### Wallet / Sync
+
+- `LUNALIB_REWARD_CONFIRMATIONS` (default: `1`) — Reward confirmations required before counted.
+- `LUNALIB_BALANCE_UPDATE_INTERVAL` (default: `15`) — Balance refresh cadence (seconds).
+- `LUNALIB_WALLET_MONITOR_INTERVAL` (default: `5`) — Wallet monitor interval (seconds).
+- `LUNALIB_SCAN_TX_LIMIT` (default: `5000`) — Max transactions kept per scan.
+- `LUNALIB_CONFIRMED_CACHE` (default: `5000`) — Confirmed transaction cache size.
+- `LUNALIB_PENDING_CACHE` (default: `2000`) — Pending transaction cache size.
+- `LUNALIB_SEEN_TX_CACHE` (default: `20000`) — Seen transaction hash cache size.
+- `LUNALIB_UI_DEBOUNCE` (default: `0.25`) — Debounce window for UI callbacks (seconds).
+
+### Mining / Daemon
+
+- `LUNALIB_TRUSTED_PEERS` (default: empty) — Comma-separated list of trusted peer IDs.
+- `LUNALIB_SEEN_TX_MAX` (default: `50000`) — Daemon seen-tx cache size.
+- `LUNALIB_MINER_STATUS_INTERVAL` (default: `5`) — Mining status update interval (seconds).
+- `LUNALIB_MINER_CONCISE` (default: `1`) — Concise mining console status output.
+- `LUNALIB_BLOCK_REWARD_MODE` (default: `linear`) — Reward mode for non-empty blocks (`linear` or `exponential`).

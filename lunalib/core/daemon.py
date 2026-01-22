@@ -3,6 +3,7 @@ import time
 import threading
 import os
 import gzip
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Callable
 import json
@@ -28,6 +29,7 @@ class BlockchainDaemon:
         self.blockchain = blockchain_manager
         self.mempool = mempool_manager
         self.security = security_manager
+        self.batch_workers = max_workers
         
         # Initialize difficulty system for validation
         from ..mining.difficulty import DifficultySystem
@@ -39,6 +41,13 @@ class BlockchainDaemon:
         self._peer_session = requests.Session()
         self.use_msgpack = bool(int(os.getenv("LUNALIB_USE_MSGPACK", "0"))) and _HAS_MSGPACK
         self.p2p_gzip = bool(int(os.getenv("LUNALIB_P2P_GZIP", "1")))
+        self.batch_workers = max_workers
+        self._seen_tx_max = int(os.getenv("LUNALIB_SEEN_TX_MAX", "50000"))
+        self._seen_tx_hashes = set()
+        self._seen_tx_order = []
+        self._trusted_peers = set(
+            p.strip() for p in os.getenv("LUNALIB_TRUSTED_PEERS", "").split(",") if p.strip()
+        )
         
         # Peer registry
         self.peers = {}  # {node_id: peer_info}
@@ -58,6 +67,44 @@ class BlockchainDaemon:
             'tx_validation_seconds': 0.0,
             'tx_validation_count': 0
         }
+
+    def _remember_seen_tx(self, tx_hash: str) -> bool:
+        if not tx_hash:
+            return False
+        if tx_hash in self._seen_tx_hashes:
+            return False
+        self._seen_tx_hashes.add(tx_hash)
+        self._seen_tx_order.append(tx_hash)
+        if len(self._seen_tx_order) > self._seen_tx_max:
+            old = self._seen_tx_order.pop(0)
+            self._seen_tx_hashes.discard(old)
+        return True
+
+    def _is_trusted_peer(self, peer_id: Optional[str]) -> bool:
+        if not peer_id:
+            return False
+        return peer_id in self._trusted_peers
+
+    def _parse_amount(self, value, default: float = 0.0) -> float:
+        """Parse numeric amounts that may include unit suffixes like '3.0JS:3'."""
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return default
+        try:
+            return float(value)
+        except Exception:
+            text = str(value)
+            match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)
+            if match:
+                try:
+                    return float(match.group(0))
+                except Exception:
+                    return default
+        return default
     
     def start(self):
         """Start the blockchain daemon"""
@@ -236,13 +283,18 @@ class BlockchainDaemon:
                 expected_reward = float(difficulty)
                 reward_type = "Linear"
             else:
-                # Regular block: exponential reward (10^(difficulty-1))
-                expected_reward = self.difficulty_system.calculate_block_reward(difficulty)
-                reward_type = "Exponential"
+                # Regular block: reward mode can be linear or exponential
+                reward_mode = os.getenv("LUNALIB_BLOCK_REWARD_MODE", "exponential").lower().strip()
+                if reward_mode == "linear":
+                    expected_reward = float(difficulty)
+                    reward_type = "Linear"
+                else:
+                    expected_reward = self.difficulty_system.calculate_block_reward(difficulty)
+                    reward_type = "Exponential"
             
-            reward_tx_amount = reward_tx.get('amount', 0) if reward_tx else None
-            actual_reward = block.get('reward', reward_tx_amount if reward_tx_amount is not None else 0)
-            if reward_tx_amount is not None and block.get('reward') is not None and abs(float(block.get('reward', 0)) - float(reward_tx_amount)) > 0.01:
+            reward_tx_amount = self._parse_amount(reward_tx.get('amount', 0)) if reward_tx else None
+            actual_reward = self._parse_amount(block.get('reward', reward_tx_amount if reward_tx_amount is not None else 0))
+            if reward_tx_amount is not None and block.get('reward') is not None and abs(self._parse_amount(block.get('reward', 0)) - self._parse_amount(reward_tx_amount)) > 0.01:
                 errors.append("Reward transaction amount does not match block reward")
             
             # Allow small tolerance for floating point comparison
@@ -278,6 +330,12 @@ class BlockchainDaemon:
             start = time.perf_counter()
             # Early reject (cheap checks)
             tx_type = (transaction.get('type') or '').lower()
+            tx_hash = transaction.get('hash', '')
+            if tx_hash:
+                if hasattr(self.mempool, "is_transaction_pending") and self.mempool.is_transaction_pending(tx_hash):
+                    return {'valid': True, 'message': 'Transaction already pending', 'errors': []}
+                if hasattr(self.mempool, "is_transaction_confirmed") and self.mempool.is_transaction_confirmed(tx_hash):
+                    return {'valid': True, 'message': 'Transaction already confirmed', 'errors': []}
             if tx_type in ("transfer", "transaction"):
                 for field in ('from', 'to', 'amount', 'timestamp', 'signature', 'public_key'):
                     if field not in transaction:
@@ -285,7 +343,7 @@ class BlockchainDaemon:
                 if not str(transaction.get('from', '')).startswith('LUN_') or not str(transaction.get('to', '')).startswith('LUN_'):
                     return {'valid': False, 'message': 'Invalid address format', 'errors': ['Invalid address format']}
                 try:
-                    if float(transaction.get('amount', 0)) <= 0:
+                    if self._parse_amount(transaction.get('amount', 0)) <= 0:
                         return {'valid': False, 'message': 'Invalid amount', 'errors': ['Invalid amount']}
                 except Exception:
                     return {'valid': False, 'message': 'Invalid amount', 'errors': ['Invalid amount']}
@@ -302,7 +360,7 @@ class BlockchainDaemon:
                         errors.append(f"Missing field: {field}")
                 
                 # Validate amount
-                amount = transaction.get('amount', 0)
+                amount = self._parse_amount(transaction.get('amount', 0))
                 if amount <= 0:
                     errors.append("Invalid amount: must be positive")
             
@@ -336,13 +394,16 @@ class BlockchainDaemon:
         except Exception as e:
             return {'valid': False, 'message': f'Validation error: {str(e)}', 'errors': [str(e)]}
 
-    def validate_transactions_batch(self, transactions: List[Dict], max_workers: int = 8) -> Dict:
+    def validate_transactions_batch(self, transactions: List[Dict], max_workers: Optional[int] = None) -> Dict:
         """Validate a batch of transactions in parallel.
 
         Returns: {'accepted': int, 'total': int, 'results': List[Dict]}
         """
+        start = time.perf_counter()
+        workers = max_workers or self.batch_workers or 1
+
         if self.security and hasattr(self.security, "validate_transaction_security_batch"):
-            sec_results = self.security.validate_transaction_security_batch(transactions, max_workers=max_workers)
+            sec_results = self.security.validate_transaction_security_batch(transactions, max_workers=workers)
             results = [
                 {"valid": ok, "message": msg, "errors": [] if ok else [msg]}
                 for ok, msg in sec_results
@@ -353,11 +414,15 @@ class BlockchainDaemon:
             def _validate(tx):
                 return self.validate_transaction(tx)
 
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
                 for res in pool.map(_validate, transactions):
                     results.append(res)
 
         accepted = sum(1 for res in results if res.get("valid"))
+        elapsed = time.perf_counter() - start
+        self.stats['transactions_validated'] += accepted
+        self.stats['tx_validation_count'] += len(transactions)
+        self.stats['tx_validation_seconds'] += elapsed
         return {"accepted": accepted, "total": len(transactions), "results": results}
     
     def process_incoming_block_async(self, block: Dict, from_peer: Optional[str] = None, callback: Callable = None) -> str:
@@ -430,8 +495,15 @@ class BlockchainDaemon:
         Validates and adds to mempool if valid.
         """
         try:
+            tx_hash = transaction.get("hash", "")
+            if tx_hash and not self._remember_seen_tx(tx_hash):
+                return {'success': True, 'message': 'Duplicate transaction ignored'}
+
             # Validate transaction
-            validation = self.validate_transaction(transaction)
+            if self._is_trusted_peer(from_peer):
+                validation = {'valid': True, 'message': 'Trusted peer', 'errors': []}
+            else:
+                validation = self.validate_transaction(transaction)
             
             if not validation['valid']:
                 print(f"❌ Invalid transaction from peer {from_peer}: {validation['message']}")
@@ -453,10 +525,24 @@ class BlockchainDaemon:
     def process_incoming_transactions_batch(self, transactions: List[Dict], from_peer: Optional[str] = None) -> Dict:
         """Process a batch of incoming transactions from P2P network."""
         try:
-            validation = self.validate_transactions_batch(transactions)
-            accepted_txs = [
-                tx for tx, res in zip(transactions, validation["results"]) if res.get("valid")
-            ]
+            filtered = []
+            for tx in transactions:
+                tx_hash = tx.get("hash", "")
+                if tx_hash and not self._remember_seen_tx(tx_hash):
+                    continue
+                if tx_hash and hasattr(self.mempool, "is_transaction_pending") and self.mempool.is_transaction_pending(tx_hash):
+                    continue
+                if tx_hash and hasattr(self.mempool, "is_transaction_confirmed") and self.mempool.is_transaction_confirmed(tx_hash):
+                    continue
+                filtered.append(tx)
+
+            if self._is_trusted_peer(from_peer):
+                accepted_txs = filtered
+            else:
+                validation = self.validate_transactions_batch(filtered, max_workers=self.batch_workers)
+                accepted_txs = [
+                    tx for tx, res in zip(filtered, validation["results"]) if res.get("valid")
+                ]
 
             if accepted_txs:
                 if hasattr(self.mempool, "add_transactions_batch_validated"):

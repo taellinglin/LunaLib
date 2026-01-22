@@ -1,13 +1,17 @@
+from tqdm import tqdm
 # blockchain.py - Updated version
 
 from ..storage.cache import BlockchainCache
 import requests
 import time
+import os
 import json
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable, Union
+import gzip
+import re
 
 
 class BlockchainManager:
@@ -21,6 +25,7 @@ class BlockchainManager:
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="BlockchainWorker")
         self._async_tasks = {}  # Track async tasks by ID
         self._task_callbacks = {}  # Callbacks for task completion
+        self._session = requests.Session()
 
     # ------------------------------------------------------------------
     # Address helpers
@@ -69,7 +74,7 @@ class BlockchainManager:
             if not self._validate_transaction_before_broadcast(transaction):
                 return False, "Transaction validation failed"
             
-            response = requests.post(
+            response = self._session.post(
                 f'{self.endpoint_url}/mempool/add',
                 json=transaction,
                 headers={'Content-Type': 'application/json'},
@@ -190,7 +195,7 @@ class BlockchainManager:
         """Get current blockchain height - FIXED VERSION"""
         try:
             # Get the actual latest block to determine height
-            response = requests.get(f'{self.endpoint_url}/blockchain/blocks', timeout=10)
+            response = self._session.get(f'{self.endpoint_url}/blockchain/blocks', timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 blocks = data.get('blocks', [])
@@ -212,7 +217,7 @@ class BlockchainManager:
     def get_latest_block(self) -> Optional[Dict]:
         """Get the actual latest block from server"""
         try:
-            response = requests.get(f'{self.endpoint_url}/blockchain/blocks', timeout=10)
+            response = self._session.get(f'{self.endpoint_url}/blockchain/blocks', timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 blocks = data.get('blocks', [])
@@ -221,24 +226,158 @@ class BlockchainManager:
         except Exception as e:
             print(f"Get latest block error: {e}")
         return None
+
+    def get_server_stats(self) -> Dict:
+        """Fetch server stats/configuration if exposed by the daemon."""
+        endpoints = [
+            f"{self.endpoint_url}/api/blockchain-stats",
+            f"{self.endpoint_url}/blockchain/stats",
+            f"{self.endpoint_url}/blockchain/status",
+        ]
+        for url in endpoints:
+            try:
+                response = self._session.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    return data if isinstance(data, dict) else {"data": data}
+            except Exception:
+                continue
+        return {}
+
+    def scan_chain(self, peer_urls: Optional[List[str]] = None) -> Optional[Dict]:
+        """Download full blockchain, favoring primary and falling back to peers."""
+        def _fetch(base_url: str) -> Optional[Dict]:
+            for url in (f"{base_url}/blockchain", f"{base_url}/api/blockchain/full"):
+                try:
+                    response = self._session.get(url, timeout=30)
+                    if response.status_code == 200:
+                        data = response.json()
+                        print(f"✅ Downloaded blockchain: {len(data.get('blocks', []))} blocks")
+                        return data
+                except Exception:
+                    continue
+            return None
+
+        data = _fetch(self.endpoint_url)
+        if data:
+            return data
+
+        if peer_urls:
+            for peer_url in peer_urls:
+                data = _fetch(peer_url.rstrip('/'))
+                if data:
+                    print(f"✅ Downloaded blockchain from peer: {peer_url}")
+                    return data
+
+        print("❌ Failed to download blockchain from primary and peers")
+        return None
     
-    def get_block(self, height: int) -> Optional[Dict]:
-        """Get block by height"""
+    def _looks_like_hash(self, value: str) -> bool:
+        if not value or len(value) != 64:
+            return False
+        return all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+    def _parse_amount(self, value, default: float = 0.0) -> float:
+        """Parse numeric amounts that may include unit suffixes like '3.0JS:3'."""
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return default
+        try:
+            return float(value)
+        except Exception:
+            text = str(value)
+            match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)
+            if match:
+                try:
+                    return float(match.group(0))
+                except Exception:
+                    return default
+        return default
+
+    def _fetch_blocks_list(self) -> List[Dict]:
+        try:
+            response = self._session.get(f'{self.endpoint_url}/blockchain/blocks', timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+                return data.get('blocks', [])
+        except Exception as e:
+            print(f"Get blocks list error: {e}")
+        return []
+
+    def get_block_by_height(self, height: int) -> Optional[Dict]:
+        """Get block by height (index)"""
         # Check cache first
         cached_block = self.cache.get_block(height)
         if cached_block:
             return cached_block
-            
+
         try:
-            response = requests.get(f'{self.endpoint_url}/blockchain/block/{height}', timeout=10)
+            response = self._session.get(f'{self.endpoint_url}/blockchain/block/{height}', timeout=10)
             if response.status_code == 200:
                 block = response.json()
                 self.cache.save_block(height, block.get('hash', ''), block)
                 return block
+            if response.status_code == 404:
+                # Fallback: some servers expect hash at /blockchain/block/<value>
+                blocks = self._fetch_blocks_list()
+                if 0 <= height < len(blocks):
+                    block = blocks[height]
+                    self.cache.save_block(height, block.get('hash', ''), block)
+                    return block
+                for block in blocks:
+                    block_index = block.get('index') if isinstance(block, dict) else None
+                    if block_index == height:
+                        self.cache.save_block(height, block.get('hash', ''), block)
+                        return block
         except Exception as e:
             print(f"Get block error: {e}")
-            
+
         return None
+
+    def get_block_by_hash(self, block_hash: str) -> Optional[Dict]:
+        """Get block by hash"""
+        if not block_hash:
+            return None
+
+        try:
+            response = self._session.get(f'{self.endpoint_url}/blockchain/block/{block_hash}', timeout=10)
+            if response.status_code == 200:
+                block = response.json()
+                height = block.get('index', block.get('height'))
+                if isinstance(height, int):
+                    self.cache.save_block(height, block.get('hash', ''), block)
+                return block
+        except Exception as e:
+            print(f"Get block by hash error: {e}")
+
+        # Fallback: scan blocks list
+        blocks = self._fetch_blocks_list()
+        for block in blocks:
+            if isinstance(block, dict) and block.get('hash') == block_hash:
+                height = block.get('index', block.get('height'))
+                if isinstance(height, int):
+                    self.cache.save_block(height, block.get('hash', ''), block)
+                return block
+
+        return None
+
+    def get_block(self, block_id: Union[int, str]) -> Optional[Dict]:
+        """Get block by height (int) or hash (str)."""
+        if isinstance(block_id, str):
+            value = block_id.strip()
+            if self._looks_like_hash(value):
+                return self.get_block_by_hash(value)
+            if value.isdigit():
+                return self.get_block_by_height(int(value))
+            return self.get_block_by_hash(value)
+
+        return self.get_block_by_height(int(block_id))
     
     def get_blocks_range_async(self, start_height: int, end_height: int, callback: Callable = None) -> str:
         """Async version: Get range of blocks in background thread
@@ -265,42 +404,55 @@ class BlockchainManager:
         return task_id
     
     def get_blocks_range(self, start_height: int, end_height: int) -> List[Dict]:
-        """Get range of blocks"""
+        """Get range of blocks (uses cache and fetches only missing blocks)"""
         blocks = []
-        
+
         # Check cache first
         cached_blocks = self.cache.get_block_range(start_height, end_height)
-        if len(cached_blocks) == (end_height - start_height + 1):
-            return cached_blocks
-            
+        cached_by_height: Dict[int, Dict] = {}
+        for block in cached_blocks:
+            height = block.get('index', block.get('height'))
+            if isinstance(height, int):
+                cached_by_height[height] = block
+
+        expected_count = (end_height - start_height + 1)
+        if len(cached_by_height) == expected_count:
+            return [cached_by_height[h] for h in range(start_height, end_height + 1)]
+
+        missing_heights = [
+            h for h in range(start_height, end_height + 1) if h not in cached_by_height
+        ]
+
         try:
-            response = requests.get(
-                f'{self.endpoint_url}/blockchain/range?start={start_height}&end={end_height}',
-                timeout=30
-            )
-            if response.status_code == 200:
-                blocks = response.json().get('blocks', [])
-                # Cache the blocks
-                for block in blocks:
-                    height = block.get('index', 0)
-                    self.cache.save_block(height, block.get('hash', ''), block)
-            else:
-                # Fallback: get blocks individually
-                for height in range(start_height, end_height + 1):
-                    block = self.get_block(height)
-                    if block:
-                        blocks.append(block)
-                    time.sleep(0.01)  # Be nice to the API
-                        
+            if not cached_by_height:
+                response = self._session.get(
+                    f'{self.endpoint_url}/blockchain/range?start={start_height}&end={end_height}',
+                    timeout=30
+                )
+                if response.status_code == 200:
+                    blocks = response.json().get('blocks', [])
+                    # Cache the blocks
+                    for block in blocks:
+                        height = block.get('index', 0)
+                        self.cache.save_block(height, block.get('hash', ''), block)
+                    return blocks
+
+            # Fallback: fetch missing blocks individually
+            for height in tqdm(missing_heights, desc="Get Blocks", leave=False):
+                block = self.get_block(height)
+                if block:
+                    cached_by_height[height] = block
+                time.sleep(0.01)  # Be nice to the API
+
         except Exception as e:
             print(f"Get blocks range error: {e}")
-            
-        return blocks
+
+        return [cached_by_height[h] for h in range(start_height, end_height + 1) if h in cached_by_height]
     
     def get_mempool(self) -> List[Dict]:
         """Get current mempool transactions"""
         try:
-            response = requests.get(f'{self.endpoint_url}/mempool', timeout=10)
+            response = self._session.get(f'{self.endpoint_url}/mempool', timeout=10)
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
@@ -311,7 +463,7 @@ class BlockchainManager:
     def check_network_connection(self) -> bool:
         """Check if network is accessible"""
         try:
-            response = requests.get(f'{self.endpoint_url}/system/health', timeout=5)
+            response = self._session.get(f'{self.endpoint_url}/system/health', timeout=5)
             self.network_connected = response.status_code == 200
             return self.network_connected
         except:
@@ -322,22 +474,24 @@ class BlockchainManager:
         """Scan blockchain for transactions involving an address"""
         if end_height is None:
             end_height = self.get_blockchain_height()
-        
+
         print(f"[SCAN] Scanning transactions for {address} from block {start_height} to {end_height}")
-            
+
         transactions = []
-        
-        # Scan in batches for efficiency
         batch_size = 100
-        for batch_start in range(start_height, end_height + 1, batch_size):
+        total_batches = ((end_height - start_height) // batch_size) + 1
+        for batch_start in tqdm(range(start_height, end_height + 1, batch_size), desc=f"Scan {address}", total=total_batches):
             batch_end = min(batch_start + batch_size - 1, end_height)
-            print(f"[SCAN] Processing batch {batch_start}-{batch_end}...")
             blocks = self.get_blocks_range(batch_start, batch_end)
-            
             for block in blocks:
                 block_transactions = self._find_address_transactions(block, address)
                 transactions.extend(block_transactions)
-        
+
+        max_tx = int(os.getenv("LUNALIB_SCAN_TX_LIMIT", "5000"))
+        if max_tx > 0 and len(transactions) > max_tx:
+            transactions.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+            transactions = transactions[:max_tx]
+
         print(f"[SCAN] Found {len(transactions)} total transactions for {address}")
         return transactions
     
@@ -389,16 +543,50 @@ class BlockchainManager:
         results: Dict[str, List[Dict]] = {addr: [] for addr in addresses}
 
         batch_size = 100
-        for batch_start in range(start_height, end_height + 1, batch_size):
+        total_batches = ((end_height - start_height) // batch_size) + 1
+        for batch_start in tqdm(range(start_height, end_height + 1, batch_size), desc="Multi-Scan", total=total_batches):
             batch_end = min(batch_start + batch_size - 1, end_height)
-            print(f"[MULTI-SCAN] Processing batch {batch_start}-{batch_end}...")
             blocks = self.get_blocks_range(batch_start, batch_end)
-
             for block in blocks:
                 collected = self._collect_transactions_for_addresses(block, normalized_map)
+                # Fallback: ensure miner reward is captured even if block shape differs
+                try:
+                    miner_raw = block.get('miner') or block.get('mined_by') or block.get('miner_address') or block.get('mined_by_address')
+                    miner_norm = self._normalize_address(miner_raw or '')
+                    reward_amount = self._parse_amount(block.get('reward', 0) or 0)
+                    if miner_norm in normalized_map and reward_amount > 0:
+                        target_addr = normalized_map[miner_norm]
+                        reward_hash = f"reward_{block.get('index')}_{block.get('hash', '')[:8]}"
+                        existing = collected.get(target_addr, [])
+                        if not any(tx.get('hash') == reward_hash for tx in existing):
+                            reward_tx = {
+                                'type': 'reward',
+                                'from': 'network',
+                                'to': target_addr,
+                                'amount': reward_amount,
+                                'block_height': block.get('index'),
+                                'timestamp': block.get('timestamp'),
+                                'hash': reward_hash,
+                                'status': 'confirmed',
+                                'description': f"Mining reward for block #{block.get('index')}",
+                                'direction': 'incoming',
+                                'effective_amount': reward_amount,
+                                'fee': 0
+                            }
+                            collected.setdefault(target_addr, []).append(reward_tx)
+                except Exception:
+                    pass
                 for original_addr, txs in collected.items():
                     if txs:
                         results[original_addr].extend(txs)
+
+        max_tx = int(os.getenv("LUNALIB_SCAN_TX_LIMIT", "5000"))
+        if max_tx > 0:
+            for addr in addresses:
+                txs = results.get(addr, [])
+                if len(txs) > max_tx:
+                    txs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+                    results[addr] = txs[:max_tx]
 
         # Summary
         total_txs = sum(len(txs) for txs in results.values())
@@ -494,7 +682,9 @@ class BlockchainManager:
         self._stop_events.append(stop_event)
 
         mempool = MempoolManager()
-        last_height = self.get_blockchain_height()
+        chain_height = self.get_blockchain_height()
+        cached_height = self.cache.get_highest_cached_height()
+        last_height = cached_height if 0 <= cached_height < chain_height else chain_height
 
         def _emit_update(confirmed_map: Dict[str, List[Dict]], pending_map: Dict[str, List[Dict]], source: str):
             try:
@@ -576,30 +766,58 @@ class BlockchainManager:
             print(f"   Block #{block_data.get('index')} | Hash: {block_data.get('hash', '')[:16]}...")
             print(f"   Transactions: {len(block_data.get('transactions', []))} | Difficulty: {block_data.get('difficulty')}")
             
-            # Step 2: Submit to the correct endpoint
-            response = requests.post(
-                f'{self.endpoint_url}/blockchain/submit-block',
-                json=block_data,
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
-            
+            # Step 2: Submit to the correct endpoint (gzip first, then plain JSON fallback)
+            timeout = float(os.getenv("LUNALIB_BLOCK_SUBMIT_TIMEOUT", "30"))
+
+            def _post(payload: bytes, headers: Dict[str, str]) -> Optional[requests.Response]:
+                try:
+                    return self._session.post(
+                        f'{self.endpoint_url}/blockchain/submit-block',
+                        data=payload,
+                        headers=headers,
+                        timeout=timeout
+                    )
+                except requests.exceptions.RequestException as e:
+                    print(f"❌ Block submit request error: {e}")
+                    return None
+
+            raw = json.dumps(block_data).encode("utf-8")
+            gz = gzip.compress(raw)
+            response = _post(gz, {'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
+
+            # Fallback to plain JSON if gzip fails or non-2xx
+            if response is None or response.status_code not in [200, 201]:
+                if response is not None:
+                    print(f"⚠️ Gzip submit failed: HTTP {response.status_code} - {response.text}")
+                response = _post(raw, {'Content-Type': 'application/json'})
+
             # Step 3: Handle response
-            if response.status_code in [200, 201]:
-                result = response.json()
+            if response and response.status_code in [200, 201]:
+                try:
+                    result = response.json()
+                except Exception:
+                    print(f"🎉 Block #{block_data.get('index')} submitted (non-JSON response)")
+                    return True
+
                 if result.get('success'):
                     print(f"🎉 Block #{block_data.get('index')} successfully added to blockchain!")
                     print(f"   Block hash: {result.get('block_hash', '')[:16]}...")
                     print(f"   Transactions count: {result.get('transactions_count', 0)}")
                     print(f"   Miner: {result.get('miner', 'unknown')}")
                     return True
-                else:
-                    error_msg = result.get('error', 'Unknown error')
-                    print(f"❌ Block submission rejected: {error_msg}")
-                    return False
-            else:
-                print(f"❌ HTTP error {response.status_code}: {response.text}")
+
+                error_msg = result.get('error', 'Unknown error')
+                print(f"❌ Block submission rejected: {error_msg}")
                 return False
+
+            # If submission failed, check if block landed anyway (race/timeout)
+            if self._confirm_block_submission(block_data):
+                print(f"✅ Block #{block_data.get('index')} confirmed on chain after submit retry")
+                return True
+
+            if response is not None:
+                print(f"❌ HTTP error {response.status_code}: {response.text}")
+            return False
                 
         except requests.exceptions.RequestException as e:
             print(f"❌ Network error submitting block: {e}")
@@ -607,6 +825,28 @@ class BlockchainManager:
         except Exception as e:
             print(f"💥 Unexpected error submitting block: {e}")
             return False
+
+    def _confirm_block_submission(self, block_data: Dict) -> bool:
+        """Confirm block made it on-chain after a submit timeout or error."""
+        try:
+            retries = int(os.getenv("LUNALIB_SUBMIT_CONFIRM_RETRIES", "3"))
+            delay = float(os.getenv("LUNALIB_SUBMIT_CONFIRM_DELAY", "1.0"))
+            target_hash = block_data.get("hash")
+            target_index = block_data.get("index")
+
+            for _ in range(max(1, retries)):
+                if target_hash:
+                    block = self.get_block_by_hash(target_hash)
+                    if block and block.get("hash") == target_hash:
+                        return True
+                if isinstance(target_index, int):
+                    block = self.get_block_by_height(target_index)
+                    if block and block.get("hash") == target_hash:
+                        return True
+                time.sleep(delay)
+        except Exception:
+            return False
+        return False
 
     def _validate_block_structure(self, block_data: Dict) -> Dict:
         """Internal: Validate block structure before submission"""
@@ -695,10 +935,11 @@ class BlockchainManager:
         """Collect transactions in a block for multiple addresses in one pass."""
         results: Dict[str, List[Dict]] = {original: [] for original in normalized_map.values()}
 
-        # Mining reward via block metadata
-        miner_norm = self._normalize_address(block.get('miner', ''))
+        # Mining reward via block metadata (support aliases)
+        miner_raw = block.get('miner') or block.get('mined_by') or block.get('miner_address') or block.get('mined_by_address')
+        miner_norm = self._normalize_address(miner_raw or '')
         if miner_norm in normalized_map:
-            reward_amount = float(block.get('reward', 0) or 0)
+            reward_amount = self._parse_amount(block.get('reward', 0) or 0)
             if reward_amount > 0:
                 target_addr = normalized_map[miner_norm]
                 reward_tx = {
@@ -723,28 +964,33 @@ class BlockchainManager:
             from_norm = self._normalize_address(tx.get('from') or tx.get('sender') or '')
             to_norm = self._normalize_address(tx.get('to') or tx.get('receiver') or '')
 
-            # Explicit reward transaction
-            if tx_type == 'reward' and to_norm in normalized_map:
-                target_addr = normalized_map[to_norm]
-                amount = float(tx.get('amount', 0) or 0)
-                enhanced = tx.copy()
-                enhanced.update({
-                    'block_height': block.get('index'),
-                    'status': 'confirmed',
-                    'tx_index': tx_index,
-                    'direction': 'incoming',
-                    'effective_amount': amount,
-                    'fee': 0,
-                })
-                enhanced.setdefault('from', 'network')
-                results[target_addr].append(enhanced)
-                continue
+            # Explicit reward transaction (support aliases)
+            if tx_type == 'reward':
+                reward_to = tx.get('to') or tx.get('receiver') or tx.get('issued_to') or tx.get('owner_address') or tx.get('to_address')
+                reward_to_norm = self._normalize_address(reward_to or '')
+                if reward_to_norm in normalized_map:
+                    target_addr = normalized_map[reward_to_norm]
+                    amount = self._parse_amount(tx.get('amount', tx.get('denomination', 0) or 0) or 0)
+                    enhanced = tx.copy()
+                    enhanced.update({
+                        'to': reward_to,
+                        'block_height': block.get('index'),
+                        'status': 'confirmed',
+                        'tx_index': tx_index,
+                        'direction': 'incoming',
+                        'effective_amount': amount,
+                        'amount': amount,
+                        'fee': 0,
+                    })
+                    enhanced.setdefault('from', 'network')
+                    results[target_addr].append(enhanced)
+                    continue
 
             # Incoming transfer
             if to_norm in normalized_map:
                 target_addr = normalized_map[to_norm]
-                amount = float(tx.get('amount', 0) or 0)
-                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                amount = self._parse_amount(tx.get('amount', 0) or 0)
+                fee = self._parse_amount(tx.get('fee', 0) or tx.get('gas', 0) or 0)
                 enhanced = tx.copy()
                 enhanced.update({
                     'block_height': block.get('index'),
@@ -760,8 +1006,8 @@ class BlockchainManager:
             # Outgoing transfer
             if from_norm in normalized_map:
                 target_addr = normalized_map[from_norm]
-                amount = float(tx.get('amount', 0) or 0)
-                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                amount = self._parse_amount(tx.get('amount', 0) or 0)
+                fee = self._parse_amount(tx.get('fee', 0) or tx.get('gas', 0) or 0)
                 enhanced = tx.copy()
                 enhanced.update({
                     'block_height': block.get('index'),
@@ -788,7 +1034,7 @@ class BlockchainManager:
         # ==================================================================
         # 1. CHECK BLOCK MINING REWARD (from block metadata)
         # ==================================================================
-        miner = block.get('miner', '')
+        miner = block.get('miner') or block.get('mined_by') or block.get('miner_address') or block.get('mined_by_address') or ''
         # Clean the miner address (remove quotes, trim)
         miner_clean = str(miner).strip('"\' ')
         
@@ -816,7 +1062,7 @@ class BlockchainManager:
         
         # Check if this block was mined by our address
         if miner_normalized == address_normalized and miner_normalized:
-            reward_amount = float(block.get('reward', 0))
+            reward_amount = self._parse_amount(block.get('reward', 0))
             if reward_amount > 0:
                 reward_tx = {
                     'type': 'reward',
@@ -870,10 +1116,10 @@ class BlockchainManager:
             # ==================================================================
             tx_type = tx.get('type', 'transfer').lower()
             if tx_type == 'reward':
-                reward_to_address = tx.get('to', '')
+                reward_to_address = tx.get('to') or tx.get('receiver') or tx.get('issued_to') or tx.get('owner_address') or tx.get('to_address') or ''
                 # Compare the reward's destination with our wallet address
                 if addresses_match(reward_to_address, address):
-                    amount = float(tx.get('amount', 0))
+                    amount = self._parse_amount(tx.get('amount', tx.get('denomination', 0) or 0))
                     enhanced_tx['direction'] = 'incoming'
                     enhanced_tx['effective_amount'] = amount
                     enhanced_tx['fee'] = 0
@@ -893,8 +1139,8 @@ class BlockchainManager:
             is_outgoing = addresses_match(from_addr, address)
             
             if is_incoming:
-                amount = float(tx.get('amount', 0))
-                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                amount = self._parse_amount(tx.get('amount', 0))
+                fee = self._parse_amount(tx.get('fee', 0) or tx.get('gas', 0) or 0)
                 
                 enhanced_tx['direction'] = 'incoming'
                 enhanced_tx['effective_amount'] = amount
@@ -905,8 +1151,8 @@ class BlockchainManager:
                 print(f"⬆️ Found incoming transaction: {amount} LUN")
                 
             elif is_outgoing:
-                amount = float(tx.get('amount', 0))
-                fee = float(tx.get('fee', 0) or tx.get('gas', 0) or 0)
+                amount = self._parse_amount(tx.get('amount', 0))
+                fee = self._parse_amount(tx.get('fee', 0) or tx.get('gas', 0) or 0)
                 
                 enhanced_tx['direction'] = 'outgoing'
                 enhanced_tx['effective_amount'] = -(amount + fee)
@@ -946,14 +1192,14 @@ class BlockchainManager:
         amount = 0
         for field in possible_amount_fields:
             if field in tx:
-                amount = float(tx.get(field, 0))
+                amount = self._parse_amount(tx.get(field, 0))
                 break
         
         # Find fee
         fee = 0
         for field in possible_fee_fields:
             if field in tx:
-                fee = float(tx.get(field, 0))
+                fee = self._parse_amount(tx.get(field, 0))
                 break
         
         # Set direction

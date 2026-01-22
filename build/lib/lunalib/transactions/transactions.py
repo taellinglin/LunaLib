@@ -1,18 +1,25 @@
-# lunalib/transactions/transactions.py
 import time
 import sys
+import os
+from lunalib.utils.console import print_info, print_warn, print_error, print_success, print_debug
 
 # --- Unicode-safe print for Windows console ---
 def safe_print(*args, **kwargs):
-    try:
-        print(*args, **kwargs)
-    except UnicodeEncodeError:
-        encoding = getattr(sys.stdout, 'encoding', 'utf-8')
-        print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
-import hashlib
+    # 既存のsafe_print呼び出しを用途別に色分けprintへ置換するためのラッパー
+    msg = " ".join(str(a) for a in args)
+    if "ERROR" in msg:
+        print_error(msg)
+    elif "WARNING" in msg:
+        print_warn(msg)
+    elif "DEBUG" in msg:
+        print_debug(msg)
+    else:
+        print_info(msg)
 import json
 from typing import Dict, Optional, Tuple, List
 from ..core.mempool import MempoolManager
+from .validator import TransactionValidator
+from lunalib.utils.hash import sm3_hex
 
 # Import REAL SM2 KeyManager from crypto module
 try:
@@ -75,6 +82,8 @@ class TransactionManager:
         self.security = TransactionSecurity()
         self.fee_calculator = FeeCalculator()
         self.mempool_manager = MempoolManager(network_endpoints)
+        self.verbose = bool(int(os.getenv("LUNALIB_DEBUG", "0")))
+        self._public_key_cache: Dict[str, str] = {}
         
         # Initialize SM2 KeyManager if available
         if SM2_AVAILABLE:
@@ -85,7 +94,7 @@ class TransactionManager:
     
     def create_transaction(self, from_address: str, to_address: str, amount: float, 
                         private_key: Optional[str] = None, memo: str = "",
-                        transaction_type: str = "transfer") -> Dict:
+                        transaction_type: str = "transfer", public_key: Optional[str] = None) -> Dict:
         """Create and sign a transaction"""
         
         # Calculate fee
@@ -97,6 +106,7 @@ class TransactionManager:
             "to": to_address,
             "amount": float(amount),
             "fee": fee,
+            "nonce": int(time.time() * 1000),
             "timestamp": int(time.time()),
             "memo": memo,
             "version": "2.0"  # Version 2.0 = SM2 signatures
@@ -107,34 +117,44 @@ class TransactionManager:
             try:
                 # Sign the transaction data
                 tx_string = self._get_signing_data(transaction)
+                transaction["_signing_data"] = tx_string
+                transaction["_signing_hash"] = sm3_hex(tx_string.encode())
                 
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Signing data: {tx_string}")
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Private key available: {bool(private_key)}")
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Private key length: {len(private_key)}")
+                if self.verbose:
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Signing data: {tx_string}")
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Private key available: {bool(private_key)}")
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Private key length: {len(private_key)}")
                 
                 signature = self.key_manager.sign_data(tx_string, private_key)
+
+                # Get public key from cache or provided value
+                if not public_key:
+                    public_key = self._public_key_cache.get(private_key)
+                    if not public_key:
+                        public_key = self.key_manager.derive_public_key(private_key)
+                        self._public_key_cache[private_key] = public_key
                 
-                # Get public key from private key
-                public_key = self.key_manager.derive_public_key(private_key)
-                
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Generated signature: {signature}")
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Generated public key: {public_key}")
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Signature length: {len(signature)}")
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Public key length: {len(public_key)}")
+                if self.verbose:
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Generated signature: {signature}")
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Generated public key: {public_key}")
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Signature length: {len(signature)}")
+                    safe_print(f"[TRANSACTIONS CREATE DEBUG] Public key length: {len(public_key)}")
                 
                 transaction["signature"] = signature
                 transaction["public_key"] = public_key
                 
-                # Immediately test verification
-                test_verify = self.key_manager.verify_signature(tx_string, signature, public_key)
-                safe_print(f"[TRANSACTIONS CREATE DEBUG] Immediate self-verification: {test_verify}")
-                
-                if not test_verify:
-                    safe_print(f"[TRANSACTIONS CREATE ERROR] Signature doesn't verify immediately!")
-                    safe_print(f"[TRANSACTIONS CREATE ERROR] This suggests an SM2 implementation issue")
+                # Optionally test verification (can be expensive)
+                if self.verbose or bool(int(os.getenv("LUNALIB_TX_SELF_VERIFY", "0"))):
+                    test_verify = self.key_manager.verify_signature(tx_string, signature, public_key)
+                    if self.verbose:
+                        safe_print(f"[TRANSACTIONS CREATE DEBUG] Immediate self-verification: {test_verify}")
+                    if not test_verify and self.verbose:
+                        safe_print(f"[TRANSACTIONS CREATE ERROR] Signature doesn't verify immediately!")
+                        safe_print(f"[TRANSACTIONS CREATE ERROR] This suggests an SM2 implementation issue")
                     
             except Exception as e:
-                safe_print(f"[TRANSACTIONS CREATE ERROR] Signing failed: {e}")
+                if self.verbose:
+                    safe_print(f"[TRANSACTIONS CREATE ERROR] Signing failed: {e}")
                 import traceback
                 traceback.print_exc()
                 transaction["signature"] = "unsigned"
@@ -148,6 +168,68 @@ class TransactionManager:
         transaction["hash"] = self._calculate_transaction_hash(transaction)
         
         return transaction
+
+    def create_transactions_batch(
+        self,
+        from_address: str,
+        to_address: str,
+        amounts: List[float],
+        private_key: Optional[str] = None,
+        memo_prefix: str = "",
+        transaction_type: str = "transfer",
+        public_key: Optional[str] = None,
+        parallel_sign: bool = True,
+        sign_workers: int = 8,
+    ) -> List[Dict]:
+        """Create and sign a batch of transactions efficiently."""
+        transactions: List[Dict] = []
+        if not amounts:
+            return transactions
+
+        fee = self.fee_calculator.get_fee(transaction_type)
+        now = int(time.time())
+
+        if private_key and self.key_manager and not public_key:
+            public_key = self._public_key_cache.get(private_key)
+            if not public_key:
+                public_key = self.key_manager.derive_public_key(private_key)
+                self._public_key_cache[private_key] = public_key
+
+        for idx, amount in enumerate(amounts):
+            memo = f"{memo_prefix}{idx}" if memo_prefix else ""
+            transaction = {
+                "type": transaction_type,
+                "from": from_address,
+                "to": to_address,
+                "amount": float(amount),
+                "fee": fee,
+                "nonce": int(time.time() * 1000) + idx,
+                "timestamp": now,
+                "memo": memo,
+                "version": "2.0",
+            }
+            transactions.append(transaction)
+
+        if private_key and self.key_manager:
+            signing_payloads = []
+            for tx in transactions:
+                tx_string = self._get_signing_data(tx)
+                tx["_signing_data"] = tx_string
+                tx["_signing_hash"] = sm3_hex(tx_string.encode())
+                signing_payloads.append(tx_string)
+
+            if parallel_sign:
+                signatures = self.key_manager.sign_data_batch(
+                    signing_payloads, private_key, max_workers=sign_workers
+                )
+            else:
+                signatures = [self.key_manager.sign_data(p, private_key) for p in signing_payloads]
+
+            for tx, signature in zip(transactions, signatures):
+                tx["signature"] = signature
+                tx["public_key"] = public_key or ""
+
+        return transactions
     
     def send_transaction(self, transaction: Dict) -> Tuple[bool, str]:
         """Send transaction to mempool for broadcasting"""
@@ -157,10 +239,7 @@ class TransactionManager:
             if not is_valid:
                 return False, f"Validation failed: {message}"
             
-            # Verify signature for non-system transactions
-            if transaction["type"] == "transfer":
-                if not self.verify_transaction_signature(transaction):
-                    return False, "Invalid transaction signature"
+            # Signature is validated inside validate_transaction (TransactionSecurity)
             
             # Add to mempool
             success = self.mempool_manager.add_transaction(transaction)
@@ -235,35 +314,45 @@ class TransactionManager:
             
             # System transactions are always valid
             if signature in ["system", "unsigned", "test"]:
-                safe_print(f"[TRANSACTIONS] Skipping signature check for {signature} transaction")
+                if self.verbose:
+                    safe_print(f"[TRANSACTIONS] Skipping signature check for {signature} transaction")
                 return True
             
             if not self.key_manager:
-                safe_print("[TRANSACTIONS] No key manager available for verification")
+                if self.verbose:
+                    safe_print("[TRANSACTIONS] No key manager available for verification")
                 return False
             
             # Check SM2 signature format
             if len(signature) != 128:
-                safe_print(f"[TRANSACTIONS] Invalid SM2 signature length: {len(signature)} (expected 128)")
+                if self.verbose:
+                    safe_print(f"[TRANSACTIONS] Invalid SM2 signature length: {len(signature)} (expected 128)")
                 return False
             
             # Get signing data (without public_key!)
-            sign_data = self._get_signing_data(transaction)
+            sign_data = transaction.get("_signing_data") or self._get_signing_data(transaction)
+            if "_signing_data" not in transaction:
+                transaction["_signing_data"] = sign_data
+                transaction["_signing_hash"] = sm3_hex(sign_data.encode())
             public_key = transaction.get("public_key", "")
             
-            safe_print(f"[TRANSACTIONS VERIFY] Signing data length: {len(sign_data)}")
-            safe_print(f"[TRANSACTIONS VERIFY] Signing data (first 100 chars): {sign_data[:100]}")
+            if self.verbose:
+                safe_print(f"[TRANSACTIONS VERIFY] Signing data length: {len(sign_data)}")
+                safe_print(f"[TRANSACTIONS VERIFY] Signing data (first 100 chars): {sign_data[:100]}")
             
             # Try to verify with KeyManager
-            safe_print(f"[TRANSACTIONS] Attempting verification...")
+            if self.verbose:
+                safe_print(f"[TRANSACTIONS] Attempting verification...")
             is_valid = self.key_manager.verify_signature(sign_data, signature, public_key)
             
-            safe_print(f"[TRANSACTIONS] SM2 signature verification result: {is_valid}")
+            if self.verbose:
+                safe_print(f"[TRANSACTIONS] SM2 signature verification result: {is_valid}")
             
             return is_valid
             
         except Exception as e:
-            safe_print(f"[TRANSACTIONS] Verification error: {e}")
+            if self.verbose:
+                safe_print(f"[TRANSACTIONS] Verification error: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -373,13 +462,13 @@ class TransactionManager:
         
         # Convert to JSON and hash
         data_string = json.dumps(tx_copy, sort_keys=True)
-        return hashlib.sha256(data_string.encode()).hexdigest()
+        return sm3_hex(data_string.encode())
     
     def _generate_reward_hash(self, to_address: str, amount: float, 
                             block_height: int) -> str:
         """Generate unique hash for reward transaction"""
         data = f"reward_{to_address}_{amount}_{block_height}_{time.time_ns()}"
-        return hashlib.sha256(data.encode()).hexdigest()
+        return sm3_hex(data.encode())
     
     def stop(self):
         """Stop the transaction manager"""

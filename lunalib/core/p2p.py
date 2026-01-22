@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Callable
 from queue import Queue
 from collections import deque
 import hashlib
+from lunalib.utils.hash import sm3_hex
 
 try:
     import msgpack  # type: ignore
@@ -70,7 +71,7 @@ class P2PClient:
         import socket
         hostname = socket.gethostname()
         timestamp = str(time.time())
-        return hashlib.sha256(f"{hostname}{timestamp}".encode()).hexdigest()[:16]
+        return sm3_hex(f"{hostname}{timestamp}".encode())[:16]
     
     def _generate_peer_url(self) -> str:
         """Generate peer URL (defaults to localhost, should be overridden for public nodes)"""
@@ -240,10 +241,17 @@ class P2PClient:
             
             if response.status_code == 200:
                 peer_data = response.json()
-                new_peers = peer_data.get('peers', [])
-                
+                new_peers = peer_data.get('peers', []) if isinstance(peer_data, dict) else peer_data
+
+                normalized = []
+                for peer in new_peers or []:
+                    if isinstance(peer, str):
+                        normalized.append({"node_id": None, "url": peer})
+                    elif isinstance(peer, dict):
+                        normalized.append(peer)
+
                 # Filter out self
-                self.peers = [p for p in new_peers if p.get('node_id') != self.node_id]
+                self.peers = [p for p in normalized if p.get('node_id') != self.node_id]
                 
                 print(f"📋 Updated peer list: {len(self.peers)} peers")
                 self.last_peer_update = time.time()

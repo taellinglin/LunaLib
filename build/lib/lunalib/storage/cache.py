@@ -8,11 +8,16 @@ def safe_print(*args, **kwargs):
     except UnicodeEncodeError:
         encoding = getattr(sys.stdout, 'encoding', 'utf-8')
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
-import sqlite3
+if sys.platform != "emscripten":
+    import sqlite3
+else:
+    sqlite3 = None
 import pickle
 import gzip
 import time
+import base64
 from typing import Dict, List, Optional
+from .indexeddb import IndexedDBStore
 
 class BlockchainCache:
     """Caches blockchain data to avoid repeated network requests"""
@@ -22,11 +27,27 @@ class BlockchainCache:
             cache_dir = os.path.join(os.path.expanduser("~"), ".luna_wallet")
         self.cache_dir = cache_dir
         self.cache_file = os.path.join(cache_dir, "blockchain_cache.db")
+        self._use_indexeddb = sys.platform == "emscripten"
+        self._use_memory_db = False
+        self._idb = None
         self._init_cache()
     
     def _init_cache(self):
         """Initialize cache database"""
-        conn = sqlite3.connect(self.cache_file)
+        if self._use_indexeddb:
+            self._idb = IndexedDBStore(
+                db_name="lunalib",
+                stores=["blocks", "mempool", "meta"],
+            )
+            return
+
+        os.makedirs(self.cache_dir, exist_ok=True)
+        try:
+            conn = sqlite3.connect(self.cache_file)
+        except sqlite3.OperationalError:
+            self.cache_file = ":memory:"
+            self._use_memory_db = True
+            conn = sqlite3.connect(self.cache_file)
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -61,6 +82,15 @@ class BlockchainCache:
     def save_block(self, height: int, block_hash: str, block_data: Dict):
         """Save block to cache"""
         try:
+            if self._use_indexeddb and self._idb:
+                payload = {
+                    "height": height,
+                    "hash": block_hash,
+                    "block_data": base64.b64encode(gzip.compress(pickle.dumps(block_data))).decode("utf-8"),
+                    "timestamp": time.time(),
+                    "last_accessed": time.time(),
+                }
+                return self._idb.put("blocks", str(height), payload)
             conn = sqlite3.connect(self.cache_file)
             cursor = conn.cursor()
             
@@ -80,6 +110,13 @@ class BlockchainCache:
     def get_block(self, height: int) -> Optional[Dict]:
         """Get block from cache"""
         try:
+            if self._use_indexeddb and self._idb:
+                payload = self._idb.get("blocks", str(height))
+                if payload:
+                    payload["last_accessed"] = time.time()
+                    self._idb.put("blocks", str(height), payload)
+                    raw = base64.b64decode(payload.get("block_data", "").encode("utf-8"))
+                    return pickle.loads(gzip.decompress(raw))
             conn = sqlite3.connect(self.cache_file)
             cursor = conn.cursor()
             
@@ -105,6 +142,22 @@ class BlockchainCache:
         """Get multiple blocks from cache"""
         blocks = []
         try:
+            if self._use_indexeddb and self._idb:
+                items = self._idb.get_all_items("blocks")
+                for item in items:
+                    payload = item.get("value")
+                    if not payload:
+                        continue
+                    height = int(payload.get("height", -1))
+                    if start_height <= height <= end_height:
+                        try:
+                            raw = base64.b64decode(payload.get("block_data", "").encode("utf-8"))
+                            block = pickle.loads(gzip.decompress(raw))
+                            blocks.append(block)
+                        except Exception:
+                            continue
+                blocks.sort(key=lambda b: b.get("height", 0))
+                return blocks
             conn = sqlite3.connect(self.cache_file)
             cursor = conn.cursor()
             
@@ -132,6 +185,10 @@ class BlockchainCache:
     def get_highest_cached_height(self) -> int:
         """Get the highest block height in cache"""
         try:
+            if self._use_indexeddb and self._idb:
+                items = self._idb.get_all_items("blocks")
+                heights = [int(item["value"].get("height", -1)) for item in items if item.get("value")]
+                return max(heights) if heights else -1
             conn = sqlite3.connect(self.cache_file)
             cursor = conn.cursor()
             
@@ -147,6 +204,15 @@ class BlockchainCache:
         """Clear blocks older than specified hours"""
         try:
             cutoff = time.time() - (max_age_hours * 3600)
+            if self._use_indexeddb and self._idb:
+                items = self._idb.get_all_items("blocks")
+                for item in items:
+                    payload = item.get("value")
+                    if not payload:
+                        continue
+                    if payload.get("last_accessed", 0) < cutoff:
+                        self._idb.delete("blocks", item.get("key"))
+                return
             conn = sqlite3.connect(self.cache_file)
             cursor = conn.cursor()
             

@@ -1,4 +1,6 @@
 import time
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Tuple, List
 from .security import TransactionSecurity
 
@@ -29,17 +31,47 @@ class TransactionValidator:
         return True, message
     
     def validate_transaction_batch(self, transactions: List[Dict]) -> Tuple[bool, List[str]]:
-        """Validate multiple transactions"""
-        results = []
+        """Validate multiple transactions with tqdm progress bar"""
+        from tqdm import tqdm
+        from lunalib.utils.console import print_info, print_error
         all_valid = True
-        
-        for tx in transactions:
-            is_valid, message = self.validate_transaction(tx)
-            results.append(message)
-            if not is_valid:
+        results: list[Tuple[bool, str]] = [None] * len(transactions)
+        pending: list[Tuple[int, Dict]] = []
+
+        for idx, tx in enumerate(transactions):
+            tx_hash = tx.get("hash")
+            if tx_hash in self.recent_transactions:
+                results[idx] = (False, "Duplicate transaction detected")
+            else:
+                pending.append((idx, tx))
+
+        if pending:
+            def _validate(item: Tuple[int, Dict]) -> Tuple[bool, str]:
+                _, tx = item
+                return self.security.validate_transaction_security(tx)
+
+            if sys.platform != "emscripten":
+                max_workers = min(8, len(pending))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    validated = list(pool.map(_validate, pending))
+            else:
+                validated = [_validate(item) for item in pending]
+
+            for (idx, tx), (ok, msg) in zip(pending, validated):
+                results[idx] = (ok, msg)
+                if ok:
+                    self._add_to_recent(tx.get("hash"))
+
+        output_messages: list[str] = []
+        for ok, msg in tqdm(results, desc="Validating transactions", ncols=80):
+            if ok:
+                print_info(msg)
+            else:
+                print_error(msg)
                 all_valid = False
-        
-        return all_valid, results
+            output_messages.append(msg)
+
+        return all_valid, output_messages
     
     def verify_transaction_inclusion(self, transaction_hash: str, block_height: int) -> bool:
         """Verify transaction is included in blockchain"""

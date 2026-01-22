@@ -1,7 +1,7 @@
 # lunalib/mining/miner.py
 import time
 import sys
-
+import os
 # --- Unicode-safe print for Windows console ---
 def safe_print(*args, **kwargs):
     try:
@@ -10,6 +10,7 @@ def safe_print(*args, **kwargs):
         encoding = getattr(sys.stdout, 'encoding', 'utf-8')
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import hashlib
+from lunalib.utils.hash import sm3_hex
 import json
 import threading
 from typing import Dict, Optional, List, Union, Callable
@@ -43,6 +44,9 @@ class GenesisMiner:
     def mine_bill(self, denomination: float, user_address: str, bill_data: Dict = None) -> Dict:
         """Mine a GTX Genesis bill using DigitalBill system"""
         try:
+            if denomination not in [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000]:
+                return {"success": False, "error": "Invalid denomination"}
+
             difficulty = self.difficulty_system.get_bill_difficulty(denomination)
             
             # Create digital bill using GTX system
@@ -214,7 +218,7 @@ class GenesisMiner:
         while self.mining_active:
             mining_data = digital_bill.get_mining_data(nonce)
             data_string = json.dumps(mining_data, sort_keys=True)
-            bill_hash = hashlib.sha256(data_string.encode()).hexdigest()
+            bill_hash = sm3_hex(data_string.encode())
             
             if bill_hash.startswith(target):
                 mining_time = time.time() - start_time
@@ -247,9 +251,16 @@ class GenesisMiner:
             # Update nonce for this attempt
             block_data["nonce"] = nonce
             
-            # Create block hash
-            block_string = json.dumps(block_data, sort_keys=True)
-            block_hash = hashlib.sha256(block_string.encode()).hexdigest()
+            # Create block hash using canonical server format
+            block_hash = self._calculate_block_hash(
+                block_data.get("index"),
+                block_data.get("previous_hash"),
+                block_data.get("timestamp"),
+                block_data.get("transactions", []),
+                nonce,
+                block_data.get("miner"),
+                block_data.get("difficulty", difficulty),
+            )
             
             if block_hash.startswith(target):
                 mining_time = time.time() - start_time
@@ -278,11 +289,19 @@ class GenesisMiner:
     def _create_mining_reward_transaction(self, miner_address: str, block_height: int, 
                                         transactions: List[Dict], block_data: Dict = None) -> Dict:
         """Create mining reward transaction with validation of the mining proof"""
-        
         # Calculate reward
-        base_reward = 1.0  # Base block reward
-        total_fees = sum(tx.get('fee', 0) for tx in transactions)
-        total_reward = base_reward + total_fees
+        difficulty = block_data.get('difficulty', 0) if block_data else 0
+        non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
+        is_empty_block = not non_reward_txs
+
+        reward_mode = self._resolve_reward_mode()
+        if is_empty_block:
+            total_reward = float(difficulty)
+        else:
+            if reward_mode == "linear":
+                total_reward = float(difficulty)
+            else:
+                total_reward = self.difficulty_system.calculate_block_reward(difficulty)
         
         # If block_data is provided, validate the mining proof
         if block_data:
@@ -318,7 +337,7 @@ class GenesisMiner:
             
             # Method 1: Original format (what server likely expects)
             original_string = f"{previous_hash}{timestamp}{merkleroot}{miner}{nonce}"
-            original_hash = hashlib.sha256(original_string.encode()).hexdigest()
+            original_hash = sm3_hex(original_string.encode())
             
             print(f"🔍 Original format validation:")
             print(f"  String: {original_string[:80]}...")
@@ -342,7 +361,7 @@ class GenesisMiner:
                 }
                 
                 json_string = json.dumps(mining_json, sort_keys=True)
-                json_hash = hashlib.sha256(json_string.encode()).hexdigest()
+                json_hash = sm3_hex(json_string.encode())
                 
                 print(f"🔍 JSON format validation:")
                 print(f"  String: {json_string[:100]}...")
@@ -366,7 +385,7 @@ class GenesisMiner:
                 }
                 
                 json_string_empty = json.dumps(mining_json_empty, sort_keys=True)
-                json_hash_empty = hashlib.sha256(json_string_empty.encode()).hexdigest()
+                json_hash_empty = sm3_hex(json_string_empty.encode())
                 
                 print(f"🔍 JSON empty format validation:")
                 print(f"  Calculated: {json_hash_empty[:16]}...")
@@ -389,6 +408,28 @@ class GenesisMiner:
             reward_type="block"
         )
 
+    def _resolve_reward_mode(self) -> str:
+        """Resolve reward mode, preferring daemon configuration when available."""
+        env_mode = os.getenv("LUNALIB_BLOCK_REWARD_MODE")
+        if env_mode:
+            return str(env_mode).lower().strip()
+
+        stats = {}
+        try:
+            stats = self.blockchain_manager.get_server_stats()
+        except Exception:
+            stats = {}
+
+        mode = (
+            stats.get("block_reward_mode")
+            or stats.get("reward_mode")
+            or stats.get("blockRewardMode")
+        )
+        if mode:
+            return str(mode).lower().strip()
+
+        return "exponential"
+
     def _calculate_merkleroot(self, transactions: List[Dict]) -> str:
         """Calculate merkle root from transactions"""
         if not transactions:
@@ -400,7 +441,7 @@ class GenesisMiner:
                 tx_hashes.append(tx['hash'])
             else:
                 tx_string = json.dumps(tx, sort_keys=True)
-                tx_hashes.append(hashlib.sha256(tx_string.encode()).hexdigest())
+                tx_hashes.append(sm3_hex(tx_string.encode()))
         
         # Simple merkle root calculation
         while len(tx_hashes) > 1:
@@ -410,7 +451,7 @@ class GenesisMiner:
                     combined = tx_hashes[i] + tx_hashes[i + 1]
                 else:
                     combined = tx_hashes[i] + tx_hashes[i]
-                new_hash = hashlib.sha256(combined.encode()).hexdigest()
+                new_hash = sm3_hex(combined.encode())
                 new_hashes.append(new_hash)
             tx_hashes = new_hashes
         
@@ -627,12 +668,18 @@ class GenesisMiner:
             }
 
 class Miner:
+    # Add: allow user to set number of CPU workers
+    def set_cpu_workers(self, num_workers: int):
+        self.cpu_workers = max(1, int(num_workers))
+
+    def get_cpu_workers(self):
+        return getattr(self, 'cpu_workers', 1)
     """
     Robust miner class that integrates with BlockchainManager, MempoolManager, 
     DifficultySystem, and security validation to mine all transaction types.
     """
 
-    def __init__(self, config, data_manager, mining_started_callback=None, mining_completed_callback=None, block_mined_callback=None):
+    def __init__(self, config, data_manager, mining_started_callback=None, mining_completed_callback=None, block_mined_callback=None, block_added_callback=None):
         self.config = config
         self.data_manager = data_manager
         self.is_mining = False
@@ -641,14 +688,34 @@ class Miner:
         self.mining_started_callback = mining_started_callback
         self.mining_completed_callback = mining_completed_callback
         self.block_mined_callback = block_mined_callback
+        self.block_added_callback = block_added_callback  # 新規: ブロックがチェーンに追加された時のコールバック
+        self.mining_status_callbacks: List[Callable] = []
 
         self.mining_history = self.data_manager.load_mining_history()
+
+        # Ensure hashrate_callback is always defined
+        self.hashrate_callback = None
+
+        # Mining engine toggles (default to enabled when unspecified)
+        def _resolve_flag(flag_names: tuple[str, ...], default: bool) -> bool:
+            for name in flag_names:
+                if hasattr(config, name):
+                    value = getattr(config, name)
+                    if value is None:
+                        continue
+                    return bool(value)
+            return default
+
+        gpu_flags = ("enable_gpu_mining", "gpu_mining", "use_gpu", "enable_cuda")
+        self.gpu_enabled = _resolve_flag(gpu_flags, True)
+        cpu_flags = ("enable_cpu_mining", "cpu_mining", "use_cpu")
+        self.cpu_enabled = _resolve_flag(cpu_flags, True)
 
         # Initialize lunalib components
         self.blockchain_manager = BlockchainManager(endpoint_url=config.node_url)
         self.mempool_manager = MempoolManager([config.node_url])
         self.difficulty_system = DifficultySystem()
-        self.cuda_manager = CUDAManager()
+        self.cuda_manager = CUDAManager() if self.gpu_enabled else None
         
         # Import security components
         try:
@@ -666,12 +733,89 @@ class Miner:
         self.mining_thread = None
         self.should_stop_mining = False
 
+        # Telemetry for recent mining attempts
+        self.last_cpu_hashrate = 0.0
+        self.last_cpu_attempts = 0
+        self.last_cpu_duration = 0.0
+        self.last_engine_used = None
+        self.last_gpu_hashrate = 0.0
+        self.last_gpu_attempts = 0
+        self.last_gpu_duration = 0.0
+        self._last_hashing_status = 0.0
+        self._reward_mode_cache = {"mode": None, "ts": 0.0}
+
+    def _resolve_reward_mode(self) -> str:
+        """Resolve reward mode, preferring daemon configuration when available."""
+        for attr in ("block_reward_mode", "reward_mode"):
+            if hasattr(self.config, attr):
+                value = getattr(self.config, attr)
+                if value:
+                    return str(value).lower().strip()
+
+        env_mode = os.getenv("LUNALIB_BLOCK_REWARD_MODE")
+        if env_mode:
+            return str(env_mode).lower().strip()
+
+        ttl = float(os.getenv("LUNALIB_REWARD_MODE_TTL", "30"))
+        now = time.time()
+        if now - self._reward_mode_cache.get("ts", 0.0) >= ttl:
+            try:
+                stats = self.blockchain_manager.get_server_stats()
+            except Exception:
+                stats = {}
+            mode = (
+                stats.get("block_reward_mode")
+                or stats.get("reward_mode")
+                or stats.get("blockRewardMode")
+            )
+            if mode:
+                self._reward_mode_cache = {"mode": str(mode).lower().strip(), "ts": now}
+        return self._reward_mode_cache.get("mode") or "exponential"
+
+    def on_mining_status(self, callback: Callable) -> None:
+        """Register a callback for mining status updates."""
+        self.mining_status_callbacks.append(callback)
+
+    def _emit_status(self, phase: str, message: str = "", payload: Optional[Dict] = None) -> None:
+        data = {
+            "phase": phase,
+            "message": message,
+            "timestamp": time.time(),
+            "engine": self.last_engine_used,
+            "hash_rate": self.hash_rate or self.last_cpu_hashrate or self.last_gpu_hashrate,
+        }
+        if payload:
+            data.update(payload)
+        if bool(int(os.getenv("LUNALIB_MINER_CONCISE", "1"))):
+            labels = {
+                "next": "Next Block...",
+                "initializing": "Initializing...",
+                "downloading": "Downloading Block...",
+                "mempool": "Downloading Mempool...",
+                "validating": "Validating...",
+                "hashing": "Hashing...",
+                "submitting": "Submitting...",
+                "success": "Success",
+                "failure": "Failure",
+            }
+            label = labels.get(phase, phase)
+            extra = f" {message}" if message else ""
+            print(f"{label}{extra}")
+        for cb in self.mining_status_callbacks:
+            try:
+                cb(data)
+            except Exception:
+                pass
+
     def mine_block(self) -> tuple[bool, str, Optional[Dict]]:
         """
         Mine a block from the mempool with proper validation and difficulty calculation.
         Returns: (success, message, block_data)
         """
+        safe_print("[DEBUG] Entered mine_block()")
         try:
+            self._emit_status("next")
+            self._emit_status("downloading", "Fetching latest block")
             # Get the latest block from the blockchain
             latest_block = self.blockchain_manager.get_latest_block()
             if not latest_block:
@@ -683,8 +827,10 @@ class Miner:
 
             # Get fresh transactions from mempool
             mempool = self._get_fresh_mempool()
+            self._emit_status("mempool", f"Fetched {len(mempool)} pending txs")
             
             # Validate all transactions
+            self._emit_status("validating", "Validating mempool transactions")
             valid_transactions = self._validate_transactions(mempool)
             
             # Calculate block difficulty based on transactions
@@ -699,8 +845,14 @@ class Miner:
                 reward_tx = self._create_empty_block_reward(new_index, block_difficulty, total_reward)
                 valid_transactions = [reward_tx]
             else:
-                # Regular block: exponential reward
-                total_reward = self._calculate_exponential_block_reward(block_difficulty)
+                # Regular block: reward mode can be linear (difficulty) or exponential
+                reward_mode = self._resolve_reward_mode()
+                if reward_mode == "linear":
+                    total_reward = float(block_difficulty)
+                else:
+                    total_reward = self._calculate_exponential_block_reward(block_difficulty)
+                reward_tx = self._create_block_reward(new_index, block_difficulty, total_reward)
+                valid_transactions = valid_transactions + [reward_tx]
 
             # Create block data
             block_data = {
@@ -715,20 +867,66 @@ class Miner:
                 'hash': ''
             }
 
-            # Try CUDA mining first if available
-            if self.cuda_manager and self.cuda_manager.cuda_available:
-                cuda_result = self._cuda_mine(block_data, block_difficulty)
+            self._emit_status("hashing", "Starting proof-of-work", {
+                "difficulty": block_difficulty,
+                "index": new_index,
+                "transaction_count": len(valid_transactions),
+            })
+
+
+            cuda_available = self.gpu_enabled and self.cuda_manager and self.cuda_manager.cuda_available
+            cpu_available = self.cpu_enabled
+
+            safe_print(f"[DEBUG] (mine_block) gpu_enabled={self.gpu_enabled}, cpu_enabled={self.cpu_enabled}, cuda_manager={self.cuda_manager}, cuda_available={cuda_available}, cpu_available={cpu_available}")
+
+            # If both are enabled, prefer GPU if available, else CPU
+            if cuda_available:
+                safe_print("[DEBUG] Mining engine selected: GPU (CUDA)")
+                self.last_engine_used = "gpu"
+                try:
+                    cuda_result = self._cuda_mine(block_data, block_difficulty)
+                except Exception as e:
+                    safe_print(f"[FATAL] Exception calling _cuda_mine: {e}")
+                    cuda_result = None
                 if cuda_result:
                     return self._finalize_block(cuda_result, 'cuda', total_reward)
+                else:
+                    safe_print("[DEBUG] GPU mining failed or not successful, falling back to CPU if available...")
+                    # Fallback to CPU if allowed
+                    if cpu_available:
+                        self.last_engine_used = "cpu"
+                        try:
+                            cpu_result = self._cpu_mine(block_data, block_difficulty)
+                        except Exception as e:
+                            safe_print(f"[FATAL] Exception calling _cpu_mine: {e}")
+                            cpu_result = None
+                        if cpu_result:
+                            return self._finalize_block(cpu_result, 'cpu', total_reward)
+                        else:
+                            safe_print("[FATAL] CPU mining also failed after GPU fallback!")
+                    else:
+                        safe_print("[FATAL] No CPU available to fallback after GPU mining failed!")
+            elif cpu_available:
+                safe_print("[DEBUG] Mining engine selected: CPU")
+                self.last_engine_used = "cpu"
+                try:
+                    cpu_result = self._cpu_mine(block_data, block_difficulty)
+                except Exception as e:
+                    safe_print(f"[FATAL] Exception calling _cpu_mine: {e}")
+                    cpu_result = None
+                if cpu_result:
+                    return self._finalize_block(cpu_result, 'cpu', total_reward)
+                else:
+                    safe_print("[FATAL] CPU mining failed!")
+            else:
+                safe_print("[FATAL] No mining engine available! Both GPU and CPU mining are disabled.")
 
-            # Fallback to CPU mining
-            cpu_result = self._cpu_mine(block_data, block_difficulty)
-            if cpu_result:
-                return self._finalize_block(cpu_result, 'cpu', total_reward)
-
-            return False, "Mining timeout - no solution found", None
+            self._emit_status("failure", "Mining disabled or timeout - no solution found")
+            return False, "Mining disabled or timeout - no solution found", None
 
         except Exception as e:
+            safe_print(f"[DEBUG] Exception in mine_block: {e}")
+            self._emit_status("failure", f"Mining error: {str(e)}")
             return False, f"Mining error: {str(e)}", None
 
     def _get_fresh_mempool(self) -> List[Dict]:
@@ -776,6 +974,10 @@ class Miner:
         
         if tx_type == 'transaction':
             if not all(k in tx for k in ['from', 'to', 'amount']):
+                return False
+            # Reject self-transfers (from == to) as they fail server validation
+            if tx.get('from') == tx.get('to'):
+                safe_print(f"⚠️  Filtering out self-transfer: {tx.get('from')} → {tx.get('to')}")
                 return False
         elif tx_type == 'genesis_bill':
             if 'denomination' not in tx:
@@ -862,63 +1064,198 @@ class Miner:
             'is_empty_block': True
         }
 
+    def _create_block_reward(self, block_index: int, difficulty: int, reward_amount: float) -> Dict:
+        """Create reward transaction for non-empty blocks using EXPONENTIAL reward system."""
+        reward_mode = self._resolve_reward_mode()
+        if reward_mode == "linear":
+            return {
+                'type': 'reward',
+                'from': 'network',
+                'to': self.config.miner_address,
+                'amount': reward_amount,
+                'timestamp': time.time(),
+                'block_height': block_index,
+                'difficulty': difficulty,
+                'hash': f"reward_{block_index}_{int(time.time())}",
+                'description': f'Block mining reward (Linear: Difficulty {difficulty} = {reward_amount} LKC)',
+                'is_empty_block': False
+            }
+        else:
+            return {
+                'type': 'reward',
+                'from': 'network',
+                'to': self.config.miner_address,
+                'amount': reward_amount,
+                'timestamp': time.time(),
+                'block_height': block_index,
+                'difficulty': difficulty,
+                'hash': f"reward_{block_index}_{int(time.time())}",
+                'description': f'Block mining reward (Exponential: Difficulty {difficulty} = {reward_amount} LKC)',
+                'is_empty_block': False
+            }
+
     def _cuda_mine(self, block_data: Dict, difficulty: int) -> Optional[Dict]:
         """Mine using CUDA acceleration"""
+        safe_print("[DEBUG] TOP OF _cuda_mine: function entered")
+        if not self.gpu_enabled:
+            safe_print("[DEBUG] _cuda_mine called but gpu_enabled is False (early return)")
+            return None
+        if not self.cuda_manager:
+            safe_print("[DEBUG] _cuda_mine: self.cuda_manager is None (early return)")
+            return None
+        if not getattr(self.cuda_manager, 'cuda_available', False):
+            safe_print("[DEBUG] _cuda_mine: cuda_manager.cuda_available is False (early return)")
+            return None
         try:
-            safe_print("Attempting CUDA mining...")
-            cuda_result = self.cuda_manager.cuda_mine_batch(
-                block_data, difficulty, batch_size=100000
-            )
+            safe_print("[DEBUG] Entering _cuda_mine: Attempting CUDA mining...")
+            if self.hashrate_callback:
+                self.hashrate_callback(0.0, 'gpu')
+            safe_print(f"[DEBUG] About to call cuda_manager.cuda_mine_batch with difficulty={difficulty}")
+            status_interval = float(os.getenv("LUNALIB_MINER_STATUS_INTERVAL", "5"))
+            batch_size = int(getattr(self.config, "cuda_batch_size", 100000) or 100000)
+            env_batch = os.getenv("LUNALIB_CUDA_BATCH_SIZE")
+            if env_batch:
+                try:
+                    batch_size = int(env_batch)
+                except Exception:
+                    pass
+
+            def _progress(update: Dict):
+                now = time.time()
+                self.hash_rate = float(update.get("hashrate", 0.0))
+                self.last_gpu_hashrate = self.hash_rate
+                self.last_gpu_attempts = int(update.get("attempts", 0))
+                self.last_gpu_duration = float(update.get("duration", 0.0))
+                if now - self._last_hashing_status >= status_interval:
+                    self._last_hashing_status = now
+                    rate = self.hash_rate
+                    self._emit_status("hashing", f"{rate:,.0f} H/s")
+                    safe_print(f"[DEBUG] [GPU] Hashrate update: {rate:,.0f} H/s, attempts={self.last_gpu_attempts}, duration={self.last_gpu_duration}")
+                    if self.hashrate_callback:
+                        self.hashrate_callback(rate, 'gpu')
+
+            cuda_result = None
+            try:
+                cuda_result = self.cuda_manager.cuda_mine_batch(
+                    block_data, difficulty, batch_size=batch_size, progress_callback=_progress
+                )
+                safe_print(f"[DEBUG] cuda_manager.cuda_mine_batch returned: {cuda_result}")
+            except Exception as ce:
+                safe_print(f"[DEBUG] Exception in cuda_manager.cuda_mine_batch: {ce}")
+                return None
             if cuda_result and cuda_result.get('success'):
+                mining_time = float(cuda_result.get("mining_time", 0))
+                nonce = int(cuda_result.get("nonce", 0))
+                if mining_time > 0:
+                    self.hash_rate = nonce / mining_time
+                    self.last_gpu_hashrate = self.hash_rate
+                    self.last_gpu_attempts = nonce
+                    self.last_gpu_duration = mining_time
+                    self.last_cpu_hashrate = 0.0
+                    self.last_cpu_attempts = 0
+                    self.last_cpu_duration = 0.0
+                    safe_print(f"[DEBUG] [GPU] Final hashrate: {self.hash_rate:,.0f} H/s, nonce={nonce}, mining_time={mining_time}")
+                    if self.hashrate_callback:
+                        self.hashrate_callback(self.hash_rate, 'gpu')
+                self.current_nonce = nonce
+                self.current_hash = cuda_result.get('hash', '')
                 block_data['hash'] = cuda_result['hash']
                 block_data['nonce'] = cuda_result['nonce']
                 return block_data
         except Exception as e:
-            safe_print(f"CUDA mining failed: {e}")
+            safe_print(f"[DEBUG] Exception in _cuda_mine: {e}")
         return None
 
     def _cpu_mine(self, block_data: Dict, difficulty: int) -> Optional[Dict]:
         """Mine using CPU"""
-        safe_print("Using CPU mining...")
+        import concurrent.futures
+        if not self.cpu_enabled:
+            safe_print("[DEBUG] _cpu_mine called but cpu_enabled is False")
+            return None
+        safe_print("[DEBUG] Entering _cpu_mine: Using CPU mining (multi-threaded)...")
+        if self.hashrate_callback:
+            self.hashrate_callback(0.0, 'cpu')
         start_time = time.time()
         target = "0" * difficulty
-        nonce = 0
-        hash_count = 0
-        last_hash_update = start_time
+        num_workers = self.get_cpu_workers()
+        max_nonce = 1000000
+        found = threading.Event()
+        result = [None]
 
-        while not self.should_stop_mining and nonce < 1000000:
-            # Calculate block hash
-            block_hash = self._calculate_block_hash(
+        def worker(start_nonce, step):
+            nonce = start_nonce
+            hash_count = 0
+            last_hash_update = time.time()
+            while not found.is_set() and nonce < max_nonce:
+                block_hash = self._calculate_block_hash(
+                    block_data['index'],
+                    block_data['previous_hash'],
+                    block_data['timestamp'],
+                    block_data['transactions'],
+                    nonce,
+                    block_data['miner'],
+                    difficulty
+                )
+                if block_hash.startswith(target):
+                    elapsed = time.time() - start_time
+                    safe_print(f"[DEBUG] [CPU] Block found: nonce={nonce}, hash={block_hash}, elapsed={elapsed:.2f}s")
+                    block_data['hash'] = block_hash
+                    block_data['nonce'] = nonce
+                    result[0] = block_data.copy()
+                    found.set()
+                    return
+                nonce += step
+                hash_count += 1
+                # Hashrate update
+                current_time = time.time()
+                if current_time - last_hash_update >= 1:
+                    rate = hash_count / (current_time - last_hash_update)
+                    last_hash_update = current_time
+                    hash_count = 0
+                    safe_print(f"[DEBUG] [CPU] Worker {start_nonce}: {rate:,.0f} H/s at nonce {nonce}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(worker, i, num_workers) for i in range(num_workers)]
+            concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+            found.set()
+        elapsed = time.time() - start_time
+        if result[0]:
+            self.last_cpu_attempts = result[0]['nonce']
+            self.last_cpu_duration = elapsed
+            self.last_cpu_hashrate = result[0]['nonce'] / elapsed if elapsed > 0 else 0.0
+            safe_print(f"[DEBUG] [CPU] Final hashrate: {self.last_cpu_hashrate:,.0f} H/s, nonce={result[0]['nonce']}, elapsed={elapsed:.2f}s")
+            if self.hashrate_callback:
+                self.hashrate_callback(self.last_cpu_hashrate, 'cpu')
+            return result[0]
+        return None
+    def profile_hash_function(self, n=10000):
+        import time
+        block_data = {
+            'index': 0,
+            'previous_hash': '0'*64,
+            'timestamp': time.time(),
+            'transactions': [],
+            'miner': 'PROFILE',
+            'difficulty': 1,
+            'nonce': 0,
+            'reward': 1.0,
+            'hash': ''
+        }
+        start = time.perf_counter()
+        for i in range(n):
+            self._calculate_block_hash(
                 block_data['index'],
                 block_data['previous_hash'],
                 block_data['timestamp'],
                 block_data['transactions'],
-                nonce,
+                i,
                 block_data['miner'],
-                difficulty
+                1
             )
-
-            if block_hash.startswith(target):
-                block_data['hash'] = block_hash
-                block_data['nonce'] = nonce
-                return block_data
-
-            nonce += 1
-            hash_count += 1
-            self.current_nonce = nonce
-            self.current_hash = block_hash
-
-            # Update hash rate
-            current_time = time.time()
-            if current_time - last_hash_update >= 1:
-                self.hash_rate = hash_count / (current_time - last_hash_update)
-                hash_count = 0
-                last_hash_update = current_time
-
-            if nonce % 1000 == 0 and not self.is_mining:
-                return None
-
-        return None
+        elapsed = time.perf_counter() - start
+        print(f"[PROFILE] {n} hashes in {elapsed:.4f}s | {n/elapsed:,.0f} H/s")
+        if n/elapsed < 10000:
+            print("[PROFILE] WARNING: Hash function is slow! Consider using a C/CUDA-accelerated version.")
 
     def _calculate_block_hash(self, index: int, previous_hash: str, timestamp: float, 
                              transactions: List[Dict], nonce: int, miner: str, difficulty: int) -> str:
@@ -936,7 +1273,7 @@ class Miner:
             }
 
             block_string = json.dumps(block_data, sort_keys=True)
-            calculated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+            calculated_hash = sm3_hex(block_string.encode())
             return calculated_hash
 
         except Exception as e:
@@ -947,10 +1284,16 @@ class Miner:
         """Finalize mined block with proper record keeping and blockchain submission"""
         mining_time = time.time() - block_data.get('timestamp', time.time())
 
+        self._emit_status("validating", "Validating mined block", {
+            "index": block_data.get("index"),
+            "hash": (block_data.get("hash", "")[:16] + "...") if block_data.get("hash") else "",
+        })
+
         # Validate block before submission
         validation_result = self._validate_mined_block(block_data)
         if not validation_result[0]:
             safe_print(f"❌ Block validation failed: {validation_result[1]}")
+            self._emit_status("failure", f"Validation failed: {validation_result[1]}")
             return False, f"Block validation failed: {validation_result[1]}", None
 
         # Block reward is already calculated based on difficulty (exponential system)
@@ -958,19 +1301,35 @@ class Miner:
 
         # Submit block to blockchain
         try:
+            self._emit_status("submitting", "Submitting mined block", {
+                "index": block_data.get("index"),
+                "method": method,
+            })
             submission_success = self.blockchain_manager.submit_mined_block(block_data)
-            
+
             if not submission_success:
                 safe_print(f"⚠️  Block #{block_data['index']} submission failed")
+                self._emit_status("failure", f"Submission failed for block #{block_data['index']}")
                 return False, f"Block #{block_data['index']} mined but submission failed", None
-            
+
             safe_print(f"✅ Block #{block_data['index']} submitted successfully (Reward: {final_reward} LKC)")
-            
+            self._emit_status("success", f"Block #{block_data['index']} submitted", {
+                "reward": final_reward,
+            })
+
+            # 新規: ブロックがチェーンに追加されたことを通知
+            if self.block_added_callback:
+                try:
+                    self.block_added_callback(block_data)
+                except Exception as e:
+                    safe_print(f"[WARN] block_added_callback error: {e}")
+
             # Clear mined transactions from mempool
             self._clear_transactions_from_mempool(block_data['transactions'])
-            
+
         except Exception as e:
             safe_print(f"❌ Block submission error: {e}")
+            self._emit_status("failure", f"Submission error: {str(e)}")
             return False, f"Block submission error: {str(e)}", None
 
         # Record mining history
@@ -1030,7 +1389,9 @@ class Miner:
         # Empty blocks use LINEAR system (difficulty = reward)
         # Regular blocks use EXPONENTIAL system (10^(difficulty-1))
         transactions = block.get('transactions', [])
-        is_empty_block = len(transactions) == 1 and transactions[0].get('is_empty_block', False)
+        reward_tx = next((tx for tx in transactions if tx.get('type') == 'reward'), None)
+        non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
+        is_empty_block = not non_reward_txs or (len(transactions) == 1 and reward_tx and reward_tx.get('is_empty_block', False))
         
         if is_empty_block:
             # Empty block: linear reward
@@ -1039,7 +1400,8 @@ class Miner:
             # Regular block: exponential reward
             expected_reward = self.difficulty_system.calculate_block_reward(difficulty)
         
-        actual_reward = block.get('reward', 0)
+        reward_tx_amount = reward_tx.get('amount', 0) if reward_tx else None
+        actual_reward = block.get('reward', reward_tx_amount if reward_tx_amount is not None else 0)
         
         # Allow some tolerance for floating point comparison
         if abs(actual_reward - expected_reward) > 0.01:
@@ -1107,6 +1469,35 @@ class Miner:
         if self.mining_started_callback:
             self.mining_started_callback()
 
+        if not self.mining_thread or not self.mining_thread.is_alive():
+            self.mining_thread = threading.Thread(target=self._mining_loop, daemon=True)
+            self.mining_thread.start()
+
+    def _mining_loop(self):
+        """Background mining loop that updates hashrate telemetry."""
+        status_interval = float(os.getenv("LUNALIB_MINER_STATUS_INTERVAL", "5"))
+        last_status = time.time()
+
+        while self.is_mining and not self.should_stop_mining:
+            success, message, block = self.mine_block()
+
+            if success:
+                if self.block_mined_callback:
+                    try:
+                        self.block_mined_callback(block)
+                    except Exception:
+                        pass
+            else:
+                # Avoid tight loop if mining is disabled/unavailable
+                time.sleep(0.25)
+
+            now = time.time()
+            if now - last_status >= status_interval:
+                last_status = now
+                engine = self.last_engine_used or "none"
+                rate = self.hash_rate or self.last_cpu_hashrate
+                safe_print(f"[MINER] engine={engine} rate={rate:,.0f} H/s nonce={self.current_nonce}")
+
     def stop_mining(self):
         """Stop the mining process"""
         self.is_mining = False
@@ -1122,5 +1513,13 @@ class Miner:
             "current_hash": self.current_hash,
             "current_nonce": self.current_nonce,
             "hash_rate": self.hash_rate,
-            "mining_history": len(self.mining_history)
+            "mining_history": len(self.mining_history),
+            "last_engine_used": self.last_engine_used,
+            "last_cpu_hashrate": self.last_cpu_hashrate,
+            "last_cpu_attempts": self.last_cpu_attempts,
+            "last_cpu_duration": self.last_cpu_duration
+            ,
+            "last_gpu_hashrate": self.last_gpu_hashrate,
+            "last_gpu_attempts": self.last_gpu_attempts,
+            "last_gpu_duration": self.last_gpu_duration
         }

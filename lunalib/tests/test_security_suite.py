@@ -20,6 +20,7 @@ Tests for:
 import unittest
 import time
 import hashlib
+from lunalib.utils.hash import sm3_hex
 import threading
 from unittest.mock import Mock, patch, MagicMock
 from typing import List, Dict
@@ -107,7 +108,7 @@ class TestRewardDifficultyCorrelation(unittest.TestCase):
         # Verify it hasn't been tampered with
         original_hash = reward_tx['hash']
         self.assertEqual(len(original_hash), 64,
-                        "Transaction hash must be valid SHA-256 (64 chars)")
+                "Transaction hash must be valid SM3 (64 chars)")
     
     def test_reward_tampering_detection(self):
         """Tampering with reward amount should be detectable"""
@@ -121,9 +122,9 @@ class TestRewardDifficultyCorrelation(unittest.TestCase):
         reward_tx['amount'] = 999.0
         
         # Recalculate hash (what a tamperer would do)
-        tampered_hash = hashlib.sha256(
+        tampered_hash = sm3_hex(
             str({k: v for k, v in reward_tx.items() if k != 'hash'}).encode()
-        ).hexdigest()
+        )
         
         # Hashes should not match
         self.assertNotEqual(tampered_hash, original_hash,
@@ -147,7 +148,7 @@ class TestRewardDifficultyCorrelation(unittest.TestCase):
             'timestamp': int(time.time()),
             'transactions': [
                 {
-                    'hash': hashlib.sha256(b'reward').hexdigest(),
+                    'hash': sm3_hex(b'reward'),
                     'type': 'reward',
                     'from': 'network',
                     'to': 'LUN_MINER_ADDRESS',

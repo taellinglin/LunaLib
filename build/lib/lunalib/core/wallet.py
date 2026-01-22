@@ -1,22 +1,117 @@
+def update_all_balances(self):
+    """Unified balance update: recalculates and persists balances."""
+    # 残高計算前にキャッシュを最新化
+    self._refresh_tx_caches()
+    available = self.calculate_available_balance()
+    # 計算値を必ずwalletsコレクションにも反映
+    if self.current_wallet_address in self.wallets:
+        self.wallets[self.current_wallet_address]["balance"] = self.balance
+        self.wallets[self.current_wallet_address]["available_balance"] = self.available_balance
+        w = self.wallets[self.current_wallet_address]
+        if hasattr(self, 'db') and self.db:
+            self.db.save_wallet(
+                self.current_wallet_address,
+                w.get("label", ""),
+                w.get("public_key", ""),
+                w.get("encrypted_private_key", b""),
+                w.get("is_locked", True),
+                w.get("created", 0),
+                self.balance,
+                available
+            )
+    from lunalib.utils.console import print_info
+    print_info(f"[WALLET] update_all_balances: balance={self.balance}, available={self.available_balance}")
+
+def _refresh_tx_caches(self):
+    """Force refresh of confirmed and pending tx caches for the current wallet."""
+    if not self.current_wallet_address:
+        return
+    from lunalib.core.blockchain import BlockchainManager
+    from lunalib.core.mempool import MempoolManager
+    blockchain = BlockchainManager()
+    mempool = MempoolManager()
+    confirmed = blockchain.scan_transactions_for_address(self.current_wallet_address)
+    pending = mempool.get_pending_transactions(self.current_wallet_address, fetch_remote=True)
+    norm = self._normalize_address(self.current_wallet_address)
+    self._confirmed_tx_cache[self.current_wallet_address] = confirmed
+    self._pending_tx_cache[self.current_wallet_address] = pending
+    if norm:
+        self._confirmed_tx_cache[norm] = confirmed
+        self._pending_tx_cache[norm] = pending
+
 import time
-import hashlib
 import json
 import os
 import secrets
 import binascii
 import base64
+import hmac
 import threading
 import concurrent.futures
 from typing import Optional, Callable, Dict, List, Tuple
-from cryptography.fernet import Fernet
 from ..core.crypto import KeyManager
 from .wallet_db import WalletDB
+from lunalib.utils.hash import derive_key_sm3, hmac_sm3
+
+_WALLET_SALT = b"luna_wallet_salt"
+
+
+def _derive_wallet_key(password: str) -> bytes:
+    return derive_key_sm3(password, _WALLET_SALT, iterations=100000, dklen=32)
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    output = bytearray()
+    counter = 0
+    while len(output) < length:
+        counter_bytes = counter.to_bytes(4, "big")
+        output.extend(hmac_sm3(key, nonce + counter_bytes))
+        counter += 1
+    return bytes(output[:length])
+
+
+def _normalize_token_bytes(token) -> bytes:
+    if isinstance(token, bytes):
+        return token
+    if isinstance(token, str):
+        try:
+            return base64.b64decode(token.encode())
+        except Exception:
+            return token.encode()
+    return bytes(token)
+
+
+def _encrypt_with_password(plaintext: bytes, password: str) -> bytes:
+    key = _derive_wallet_key(password)
+    nonce = os.urandom(16)
+    stream = _keystream(key, nonce, len(plaintext))
+    ciphertext = bytes(a ^ b for a, b in zip(plaintext, stream))
+    mac = hmac_sm3(key, nonce + ciphertext)
+    return b"WL3" + nonce + ciphertext + mac
+
+
+def _decrypt_with_password(token, password: str) -> bytes:
+    token_bytes = _normalize_token_bytes(token)
+    if token_bytes.startswith(b"gAAAA"):
+        raise ValueError("Legacy Fernet token not supported without cryptography")
+    if not token_bytes.startswith(b"WL3"):
+        raise ValueError("Unsupported wallet encryption format")
+    nonce = token_bytes[3:19]
+    mac = token_bytes[-32:]
+    ciphertext = token_bytes[19:-32]
+    key = _derive_wallet_key(password)
+    expected_mac = hmac_sm3(key, nonce + ciphertext)
+    if not hmac.compare_digest(mac, expected_mac):
+        raise ValueError("Invalid password or corrupted data")
+    stream = _keystream(key, nonce, len(ciphertext))
+    return bytes(a ^ b for a, b in zip(ciphertext, stream))
 
 
 class LunaWallet:
     def __init__(self, data_dir=None):
         self.data_dir = data_dir or os.path.expanduser("~/.lunawallet")
-        print(f"[LunaWallet] data_dir: {self.data_dir}")
+        from lunalib.utils.console import print_info
+        print_info(f"[LunaWallet] data_dir: {self.data_dir}")
         self.db = WalletDB(self.data_dir)
         self.wallets = {}  # address -> wallet dict (in-memory cache)
         self.current_wallet_address = None
@@ -25,10 +120,18 @@ class LunaWallet:
         self.balance_callbacks = []
         self.balance_loading = False
         self.last_balance_update = 0
-        self.balance_update_interval = 30  # seconds
+        self.balance_update_interval = float(os.getenv("LUNALIB_BALANCE_UPDATE_INTERVAL", "5"))
         self._reset_current_wallet()
         self._confirmed_tx_cache: Dict[str, List[Dict]] = {}
         self._pending_tx_cache: Dict[str, List[Dict]] = {}
+        self._ui_callbacks: List[Callable] = []
+        self._ui_event_callbacks: List[Callable] = []
+        self._ui_debounce = float(os.getenv("LUNALIB_UI_DEBOUNCE", "0.25"))
+        self._ui_pending_payload: Dict[str, Dict] = {}
+        self._ui_pending_events: Dict[str, Dict] = {}
+        self._ui_timer: Optional[threading.Timer] = None
+        self._ui_handler_registered = False
+        self._ui_event_handler_registered = False
         self._load_wallets_from_db()
 
     def _load_wallets_from_db(self):
@@ -67,9 +170,9 @@ class LunaWallet:
         wallet_data = self.wallets[address]
         try:
             if wallet_data.get("encrypted_private_key"):
-                key = base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
-                fernet = Fernet(key)
-                decrypted_key = fernet.decrypt(wallet_data["encrypted_private_key"])
+                decrypted_key = _decrypt_with_password(
+                    wallet_data["encrypted_private_key"], password
+                )
                 wallet_data["private_key"] = decrypted_key.decode()
                 wallet_data["is_locked"] = False
                 if self.current_wallet_address == address:
@@ -118,50 +221,68 @@ class LunaWallet:
         }
 
     def get_wallet_balances(self, address=None):
-        """Get available and pending balances for a wallet."""
+        """最新のavailable/pending残高をWalletStateManagerから取得して返す。"""
         addr = address or self.current_wallet_address
-        if not addr or addr not in self.wallets:
+        if not addr:
             return {"success": False, "error": "Wallet not found"}
-        data = self.wallets[addr]
-        pending_out = 0.0
-        pending_in = 0.0
-        if addr in self._pending_tx_cache:
-            pending_out, pending_in = self._compute_pending_totals(
-                self._pending_tx_cache[addr], addr
-            )
-        return {
-            "address": addr,
-            "balance": data.get("balance", 0.0),
-            "available_balance": data.get("available_balance", 0.0),
-            "pending_out": pending_out,
-            "pending_in": pending_in,
-        }
+        try:
+            from .wallet_manager import get_wallet_manager
+            state_manager = get_wallet_manager()
+            # 最新の残高情報を取得
+            balance_data = state_manager.get_balance(addr)
+            if not balance_data:
+                return {"success": False, "error": "No balance data found"}
+            return {
+                "address": addr,
+                "balance": balance_data.get("confirmed_balance", 0.0),
+                "available_balance": balance_data.get("available_balance", 0.0),
+                "pending_in": balance_data.get("pending_incoming", 0.0),
+                "pending_out": balance_data.get("pending_outgoing", 0.0),
+                "total_balance": balance_data.get("total_balance", 0.0),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to get balance: {e}"}
 
     def get_wallet_transaction_history(self, address=None):
-        """Get confirmed and pending transactions for a wallet."""
+        """Get confirmed and pending transactions for a wallet (includes rewards)."""
         addr = address or self.current_wallet_address
         if not addr:
             return {"success": False, "error": "No wallet selected"}
-        confirmed = self._confirmed_tx_cache.get(addr, [])
-        pending = self._pending_tx_cache.get(addr, [])
+
+        norm_addr = self._normalize_address(addr)
+
+        confirmed = self._confirmed_tx_cache.get(norm_addr, [])
+        pending = self._pending_tx_cache.get(norm_addr, [])
+
         if not confirmed:
             from lunalib.core.blockchain import BlockchainManager
 
             blockchain = BlockchainManager()
             confirmed = blockchain.scan_transactions_for_address(addr)
-            self._confirmed_tx_cache[addr] = confirmed
+            self._confirmed_tx_cache[norm_addr] = confirmed
+
         if not pending:
             from lunalib.core.mempool import MempoolManager
 
             mempool = MempoolManager()
             pending = mempool.get_pending_transactions(addr, fetch_remote=True)
-            self._pending_tx_cache[addr] = pending
+            self._pending_tx_cache[norm_addr] = pending
+
+        reward_txs = [
+            tx
+            for tx in confirmed
+            if tx.get("type", "").lower() in ["reward", "mining", "gtx_genesis"]
+            or tx.get("from") == "network"
+        ]
+
         return {
             "address": addr,
             "confirmed": confirmed,
             "pending": pending,
+            "reward_transactions": reward_txs,
             "total_confirmed": len(confirmed),
             "total_pending": len(pending),
+            "total_rewards": len(reward_txs),
         }
 
     def __init__(self, data_dir=None):
@@ -174,7 +295,7 @@ class LunaWallet:
         self.balance_callbacks = []
         self.balance_loading = False
         self.last_balance_update = 0
-        self.balance_update_interval = 30  # seconds
+        self.balance_update_interval = float(os.getenv("LUNALIB_BALANCE_UPDATE_INTERVAL", "5"))
         self._reset_current_wallet()
         self._confirmed_tx_cache: Dict[str, List[Dict]] = {}
         self._pending_tx_cache: Dict[str, List[Dict]] = {}
@@ -252,9 +373,7 @@ class LunaWallet:
         private_key, public_key, address = self._generate_key_pair()
 
         # Encrypt private key
-        key = base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
-        fernet = Fernet(key)
-        encrypted_private_key = fernet.encrypt(private_key.encode())
+        encrypted_private_key = _encrypt_with_password(private_key.encode(), password)
 
         # Create wallet data
         wallet_data = {
@@ -295,9 +414,7 @@ class LunaWallet:
         private_key_hex, public_key_hex, address = self._generate_key_pair()
 
         # Encrypt private key
-        key = base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
-        fernet = Fernet(key)
-        encrypted_private_key = fernet.encrypt(private_key_hex.encode())
+        encrypted_private_key = _encrypt_with_password(private_key_hex.encode(), password)
 
         # Create wallet data
         new_wallet_data = {
@@ -346,11 +463,9 @@ class LunaWallet:
         try:
             if wallet_data.get("encrypted_private_key"):
                 # Decrypt private key
-                key = base64.urlsafe_b64encode(
-                    hashlib.sha256(password.encode()).digest()
+                decrypted_key = _decrypt_with_password(
+                    wallet_data["encrypted_private_key"], password
                 )
-                fernet = Fernet(key)
-                decrypted_key = fernet.decrypt(wallet_data["encrypted_private_key"])
 
                 # Update wallet data
                 wallet_data["private_key"] = decrypted_key.decode()
@@ -400,16 +515,28 @@ class LunaWallet:
     def calculate_available_balance(self) -> float:
         """Calculate available balance (total balance minus pending outgoing transactions)"""
         try:
-            # Get total balance from blockchain
-            total_balance = self._get_total_balance_from_blockchain()
+            from lunalib.core.blockchain import BlockchainManager
+            blockchain = BlockchainManager()
+            current_height = blockchain.get_blockchain_height()
 
-            # Get pending outgoing amount
-            pending_outgoing = self._get_pending_balance()
+            addr = self.current_wallet_address or self.address
+            if not addr:
+                return self.balance
+            norm_addr = self._normalize_address(addr)
 
-            # Also check for any incoming pending transactions
-            incoming_pending = self._get_pending_incoming_balance()
+            # Get confirmed transactions for this wallet
+            confirmed = self._confirmed_tx_cache.get(norm_addr, [])
+            if not confirmed and addr in self._confirmed_tx_cache:
+                confirmed = self._confirmed_tx_cache.get(addr, [])
+            total_balance = self._compute_confirmed_balance(confirmed, current_height)
 
-            available_balance = max(0.0, total_balance - pending_outgoing)
+            # Get pending transactions for this wallet
+            pending = self._pending_tx_cache.get(norm_addr, [])
+            if not pending and addr in self._pending_tx_cache:
+                pending = self._pending_tx_cache.get(addr, [])
+            pending_out, pending_in = self._compute_pending_totals(pending, addr, current_height)
+
+            available_balance = max(0.0, total_balance + pending_in - pending_out)
 
             # Update both current wallet and wallets collection
             self.available_balance = available_balance
@@ -422,11 +549,11 @@ class LunaWallet:
                 self.wallets[self.current_wallet_address]["balance"] = total_balance
 
             print(
-                f"DEBUG: Balance calculated - Total: {total_balance}, Pending Out: {pending_outgoing}, Available: {available_balance}"
+                f"DEBUG: Balance calculated - Total: {total_balance}, Pending Out: {pending_out}, Pending In: {pending_in}, Available: {available_balance}"
             )
 
-            if incoming_pending > 0:
-                print(f"DEBUG: Also {incoming_pending} LUN incoming (pending)")
+            if pending_in > 0:
+                print(f"DEBUG: Also {pending_in} LUN incoming (pending, including rewards)")
 
             return available_balance
 
@@ -435,15 +562,32 @@ class LunaWallet:
             return self.balance  # Fallback to total balance
 
     def _compute_confirmed_balance(self, transactions: List[Dict]) -> float:
-        """Compute confirmed balance from a list of transactions."""
+        """Compute confirmed balance from a list of transactions, using confirmation count for rewards."""
         total_balance = 0.0
+        current_height = None
+        import inspect
+        required_conf = int(os.getenv("LUNALIB_REWARD_CONFIRMATIONS", "1"))
+        # Try to get current_height from caller if passed
+        frame = inspect.currentframe().f_back
+        if frame and 'current_height' in frame.f_locals:
+            current_height = frame.f_locals['current_height']
         for tx in transactions:
             tx_type = (tx.get("type") or "").lower()
             direction = tx.get("direction", "")
             amount = float(tx.get("amount", 0) or 0)
+            block_height = tx.get("block_height")
+            confirmations = None
+            if block_height is not None and current_height is not None:
+                try:
+                    confirmations = int(current_height) - int(block_height) + 1
+                except Exception:
+                    confirmations = None
 
             if tx_type == "reward" or tx.get("from") == "network":
-                total_balance += amount
+                print(f"[DEBUG] reward tx: {tx}, confirmations={confirmations}")
+                # block_heightやcurrent_heightがNoneならとりあえず加算
+                if confirmations is None or confirmations >= required_conf:
+                    total_balance += amount
             elif direction == "incoming":
                 total_balance += amount
             elif direction == "outgoing":
@@ -451,27 +595,42 @@ class LunaWallet:
                 total_balance -= amount
                 total_balance -= fee
 
+        print(f"[DEBUG] computed confirmed balance: {total_balance}")
         return max(0.0, total_balance)
 
     def _compute_pending_totals(
-        self, pending_txs: List[Dict], address: str
+        self, pending_txs: List[Dict], address: str, current_height: int = None
     ) -> Tuple[float, float]:
-        """Return (pending_outgoing, pending_incoming) for an address."""
+        """Return (pending_outgoing, pending_incoming) for an address, including pending rewards (<6 confs)."""
         pending_out = 0.0
         pending_in = 0.0
+
+        required_conf = int(os.getenv("LUNALIB_REWARD_CONFIRMATIONS", "1"))
 
         target_norm = self._normalize_address(address)
         for tx in pending_txs:
             from_norm = self._normalize_address(tx.get("from") or tx.get("sender"))
             to_norm = self._normalize_address(tx.get("to") or tx.get("receiver"))
+            tx_type = (tx.get("type") or "").lower()
+            amount = float(tx.get("amount", 0) or 0)
+            block_height = tx.get("block_height")
+            confirmations = None
+            if block_height is not None and current_height is not None:
+                try:
+                    confirmations = int(current_height) - int(block_height) + 1
+                except Exception:
+                    confirmations = None
 
             if from_norm == target_norm:
-                amount = float(tx.get("amount", 0) or 0)
                 fee = float(tx.get("fee", 0) or tx.get("gas", 0) or 0)
                 pending_out += amount + fee
             if to_norm == target_norm:
-                amount = float(tx.get("amount", 0) or 0)
-                pending_in += amount
+                # For rewards, only count as pending if confirmations < 6
+                if tx_type == "reward" or tx.get("from") == "network":
+                    if confirmations is not None and confirmations < required_conf:
+                        pending_in += amount
+                else:
+                    pending_in += amount
 
         return pending_out, pending_in
 
@@ -480,12 +639,13 @@ class LunaWallet:
         updated: Dict[str, Dict[str, float]] = {}
 
         for addr, wallet_data in self.wallets.items():
-            confirmed = self._confirmed_tx_cache.get(addr, [])
-            pending = self._pending_tx_cache.get(addr, [])
+            norm = self._normalize_address(addr)
+            confirmed = self._confirmed_tx_cache.get(norm, []) if norm else self._confirmed_tx_cache.get(addr, [])
+            pending = self._pending_tx_cache.get(norm, []) if norm else self._pending_tx_cache.get(addr, [])
 
             total_balance = max(0.0, self._compute_confirmed_balance(confirmed))
             pending_out, pending_in = self._compute_pending_totals(pending, addr)
-            available_balance = max(0.0, total_balance - pending_out)
+            available_balance = max(0.0, total_balance + pending_in - pending_out)
 
             wallet_data["balance"] = total_balance
             wallet_data["available_balance"] = available_balance
@@ -504,7 +664,7 @@ class LunaWallet:
         return updated
 
     def refresh_all_wallet_balances(self) -> Dict[str, Dict[str, float]]:
-        """Scan blockchain once for all wallets, then update balances with pending mempool data."""
+        """Scan blockchain and mempool for all wallets, update balances and pending info."""
         addresses = list(self.wallets.keys())
         if not addresses:
             return {}
@@ -517,15 +677,59 @@ class LunaWallet:
             mempool = MempoolManager()
 
             confirmed_map = blockchain.scan_transactions_for_addresses(addresses)
-            pending_map = mempool.get_pending_transactions_for_addresses(
-                addresses, fetch_remote=True
-            )
+            pending_map = mempool.get_pending_transactions_for_addresses(addresses, fetch_remote=True)
 
-            # Reset caches with the latest snapshots
-            self._confirmed_tx_cache = confirmed_map
-            self._pending_tx_cache = pending_map
+            # Reset caches with normalized + original keys
+            normalized_confirmed: Dict[str, List[Dict]] = {}
+            for addr, txs in confirmed_map.items():
+                normalized_confirmed[addr] = txs
+                norm = self._normalize_address(addr)
+                if norm:
+                    normalized_confirmed[norm] = txs
 
-            return self._recompute_balances_from_cache()
+            normalized_pending: Dict[str, List[Dict]] = {}
+            for addr, txs in pending_map.items():
+                normalized_pending[addr] = txs
+                norm = self._normalize_address(addr)
+                if norm:
+                    normalized_pending[norm] = txs
+
+            self._confirmed_tx_cache = normalized_confirmed
+            self._pending_tx_cache = normalized_pending
+
+            # Recompute balances and pending for all wallets
+            updated: Dict[str, Dict[str, float]] = {}
+            for addr in addresses:
+                norm = self._normalize_address(addr)
+                confirmed = normalized_confirmed.get(norm, []) if norm else normalized_confirmed.get(addr, [])
+                pending = normalized_pending.get(norm, []) if norm else normalized_pending.get(addr, [])
+                # 最新のブロック高を取得
+                try:
+                    current_height = blockchain.get_blockchain_height()
+                except Exception:
+                    current_height = None
+                total_balance = max(0.0, self._compute_confirmed_balance(confirmed))
+                pending_out, pending_in = self._compute_pending_totals(pending, addr, current_height)
+                available_balance = max(0.0, total_balance + pending_in - pending_out)
+
+                wallet_data = self.wallets.get(addr, {})
+                wallet_data["balance"] = total_balance
+                wallet_data["available_balance"] = available_balance
+                wallet_data["pending_out"] = pending_out
+                wallet_data["pending_in"] = pending_in
+
+                if addr == self.current_wallet_address:
+                    self.balance = total_balance
+                    self.available_balance = available_balance
+
+                updated[addr] = {
+                    "balance": total_balance,
+                    "available_balance": available_balance,
+                    "pending_out": pending_out,
+                    "pending_in": pending_in,
+                }
+
+            return updated
 
         except Exception as e:
             print(f"DEBUG: Error refreshing all wallet balances: {e}")
@@ -541,14 +745,16 @@ class LunaWallet:
         """Return balances and (optionally) cached transactions for all wallets."""
         overview: Dict[str, Dict] = {}
         for addr, wallet_data in self.wallets.items():
-            confirmed = self._confirmed_tx_cache.get(addr, [])
-            pending = self._pending_tx_cache.get(addr, [])
+            norm = self._normalize_address(addr)
+            confirmed = self._confirmed_tx_cache.get(norm, []) if norm else self._confirmed_tx_cache.get(addr, [])
+            pending = self._pending_tx_cache.get(norm, []) if norm else self._pending_tx_cache.get(addr, [])
 
+            # pending_in/pending_outはwallet_dataに格納済み
             overview[addr] = {
                 "balance": wallet_data.get("balance", 0.0),
                 "available_balance": wallet_data.get("available_balance", 0.0),
-                "pending_out": self._compute_pending_totals(pending, addr)[0],
-                "pending_in": self._compute_pending_totals(pending, addr)[1],
+                "pending_out": wallet_data.get("pending_out", 0.0),
+                "pending_in": wallet_data.get("pending_in", 0.0),
             }
 
             if include_transactions:
@@ -563,14 +769,22 @@ class LunaWallet:
         """Update caches from monitor callbacks and recompute balances."""
         for addr, txs in confirmed_map.items():
             self._confirmed_tx_cache.setdefault(addr, []).extend(txs)
+            norm = self._normalize_address(addr)
+            if norm:
+                self._confirmed_tx_cache.setdefault(norm, []).extend(txs)
 
         for addr, txs in pending_map.items():
             self._pending_tx_cache[addr] = txs
+            norm = self._normalize_address(addr)
+            if norm:
+                self._pending_tx_cache[norm] = txs
 
         return self._recompute_balances_from_cache()
 
-    def start_wallet_monitoring(self, poll_interval: int = 15):
+    def start_wallet_monitoring(self, poll_interval: int = None):
         """Start monitoring blockchain and mempool for all wallets."""
+        if poll_interval is None:
+            poll_interval = int(os.getenv("LUNALIB_WALLET_MONITOR_INTERVAL", "5"))
         addresses = list(self.wallets.keys())
         if not addresses:
             print("DEBUG: No wallets to monitor")
@@ -813,6 +1027,26 @@ class LunaWallet:
             if success:
                 print(f"[SM2] Transaction broadcast: {message}")
 
+                # Add to local pending cache + history immediately
+                pending_tx = transaction.copy()
+                pending_tx["status"] = "pending"
+                pending_tx["direction"] = "outgoing"
+                pending_tx["effective_amount"] = -(
+                    float(transaction.get("amount", 0)) + float(transaction.get("fee", 0) or 0)
+                )
+                addr = self.current_wallet_address or self.address
+                if addr:
+                    pending_list = self._pending_tx_cache.get(addr, [])
+                    # Avoid duplicates by hash
+                    tx_hash = pending_tx.get("hash")
+                    if not any(t.get("hash") == tx_hash for t in pending_list):
+                        pending_list.append(pending_tx)
+                        self._pending_tx_cache[addr] = pending_list
+
+                if hasattr(self, "transactions") and isinstance(self.transactions, list):
+                    if not any(t.get("hash") == pending_tx.get("hash") for t in self.transactions):
+                        self.transactions.append(pending_tx)
+
                 # Update balance immediately
                 total_cost = amount + transaction.get("fee", 0)
                 self.available_balance -= total_cost
@@ -823,6 +1057,12 @@ class LunaWallet:
 
                 # Save state
                 self.save_wallet_data()
+
+                # Recompute balances using pending cache
+                try:
+                    self.calculate_available_balance()
+                except Exception:
+                    pass
 
                 # Trigger async balance refresh to get accurate data
                 self.start_async_balance_loading()
@@ -1158,11 +1398,9 @@ class LunaWallet:
 
         try:
             if wallet_data.get("encrypted_private_key"):
-                key = base64.urlsafe_b64encode(
-                    hashlib.sha256(password.encode()).digest()
+                decrypted_key = _decrypt_with_password(
+                    wallet_data["encrypted_private_key"], password
                 )
-                fernet = Fernet(key)
-                decrypted_key = fernet.decrypt(wallet_data["encrypted_private_key"])
                 return decrypted_key.decode()
         except:
             pass
@@ -1280,11 +1518,19 @@ class LunaWallet:
             print(f"🔄 Syncing {len(addresses)} wallets...")
 
             # Get data from blockchain and mempool (single scan)
-            blockchain_txs = blockchain.scan_transactions_for_addresses(addresses)
+            end_height = blockchain.get_blockchain_height()
+            if end_height <= state_manager.last_blockchain_height:
+                blockchain_txs = {}
+            else:
+                start_height = max(0, state_manager.last_blockchain_height + 1)
+                blockchain_txs = blockchain.scan_transactions_for_addresses(
+                    addresses, start_height=start_height, end_height=end_height
+                )
             mempool_txs = mempool.get_pending_transactions_for_addresses(addresses)
 
             # Sync state manager with the data
             state_manager.sync_wallets_from_sources(blockchain_txs, mempool_txs)
+            state_manager.last_blockchain_height = end_height
 
             # Update LunaWallet balances from state manager
             balances = state_manager.get_all_balances()
@@ -1385,9 +1631,96 @@ class LunaWallet:
             from .wallet_manager import get_wallet_manager
 
             state_manager = get_wallet_manager()
-            state_manager.on_balance_update(callback)
+            self._ui_callbacks.append(callback)
+
+            if not self._ui_handler_registered:
+                def _ui_handler(balance_data: Dict):
+                    self._queue_ui_update(balance_data)
+
+                state_manager.on_balance_update(_ui_handler)
+                self._ui_handler_registered = True
         except Exception as e:
             print(f"⚠️  Error registering callback: {e}")
+
+    def register_wallet_event_callback(self, callback: Callable) -> None:
+        """
+        Register a callback to receive change-only transaction events.
+        Callback will be called with: callback(event_data_dict)
+        """
+        try:
+            from .wallet_manager import get_wallet_manager
+
+            state_manager = get_wallet_manager()
+            self._ui_event_callbacks.append(callback)
+
+            if not self._ui_event_handler_registered:
+                def _event_handler(event_data: Dict):
+                    self._queue_ui_event_update(event_data)
+
+                state_manager.on_event_update(_event_handler)
+                self._ui_event_handler_registered = True
+        except Exception as e:
+            print(f"⚠️  Error registering event callback: {e}")
+
+    def _queue_ui_update(self, balance_data: Dict) -> None:
+        """Coalesce balance updates for UI callbacks."""
+        if not balance_data:
+            return
+
+        if self._ui_pending_payload:
+            self._ui_pending_payload.update(balance_data)
+        else:
+            self._ui_pending_payload = dict(balance_data)
+
+        if self._ui_timer and self._ui_timer.is_alive():
+            return
+
+        self._ui_timer = threading.Timer(self._ui_debounce, self._flush_ui_update)
+        self._ui_timer.daemon = True
+        self._ui_timer.start()
+
+    def _queue_ui_event_update(self, event_data: Dict) -> None:
+        """Coalesce transaction event updates for UI callbacks."""
+        if not event_data:
+            return
+
+        if self._ui_pending_events:
+            for addr, payload in event_data.items():
+                if addr in self._ui_pending_events:
+                    existing = self._ui_pending_events[addr]
+                    existing.setdefault('new_confirmed', []).extend(payload.get('new_confirmed', []))
+                    existing.setdefault('new_pending', []).extend(payload.get('new_pending', []))
+                    existing.setdefault('promoted', []).extend(payload.get('promoted', []))
+                    existing.setdefault('pending_cleared', []).extend(payload.get('pending_cleared', []))
+                else:
+                    self._ui_pending_events[addr] = payload
+        else:
+            self._ui_pending_events = dict(event_data)
+
+        if self._ui_timer and self._ui_timer.is_alive():
+            return
+
+        self._ui_timer = threading.Timer(self._ui_debounce, self._flush_ui_update)
+        self._ui_timer.daemon = True
+        self._ui_timer.start()
+
+    def _flush_ui_update(self) -> None:
+        payload = self._ui_pending_payload
+        events = self._ui_pending_events
+        self._ui_pending_payload = {}
+        self._ui_pending_events = {}
+
+        for callback in list(self._ui_callbacks):
+            try:
+                callback(payload)
+            except Exception as e:
+                print(f"⚠️  Error in UI callback: {e}")
+
+        for callback in list(self._ui_event_callbacks):
+            try:
+                callback(events)
+            except Exception as e:
+                print(f"⚠️  Error in UI event callback: {e}")
 
     def start_continuous_sync(
         self, blockchain=None, mempool=None, poll_interval: int = 30

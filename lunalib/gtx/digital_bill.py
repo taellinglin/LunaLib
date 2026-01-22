@@ -7,6 +7,7 @@ def safe_print(*args, **kwargs):
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import time
 import hashlib
+from lunalib.utils.hash import sm3_hex
 import secrets
 import json
 import base64
@@ -58,7 +59,7 @@ class DigitalBill:
             "timestamp": self.created_time,
             "bill_serial": self.bill_serial
         }
-        return hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()
+        return sm3_hex(json.dumps(metadata, sort_keys=True).encode())
     
     def get_mining_data(self, nonce):
         """Get data for mining computation"""
@@ -124,7 +125,7 @@ class DigitalBill:
     def _get_previous_hash(self):
         """Get hash of previous genesis transaction"""
         # In production, this would query the blockchain
-        return hashlib.sha256(str(time.time()).encode()).hexdigest()
+        return sm3_hex(str(time.time()).encode())
     
     # Signature methods from your signatures.py
     def to_dict(self):
@@ -142,7 +143,7 @@ class DigitalBill:
     def calculate_hash(self):
         """Calculate SHA-256 hash of the bill data"""
         bill_string = json.dumps(self.to_dict(), sort_keys=True)
-        return hashlib.sha256(bill_string.encode()).hexdigest()
+        return sm3_hex(bill_string.encode())
     
     def sign(self, private_key):
         """Sign the bill data with a private key"""
@@ -178,11 +179,11 @@ class DigitalBill:
         else:
             signature_input = f"fallback_key{bill_hash}"
         
-        self.signature = hashlib.sha256(signature_input.encode()).hexdigest()
+        self.signature = sm3_hex(signature_input.encode())
         
         # Set fallback public key
         if isinstance(private_key, str) and len(private_key) > 32:
-            self.public_key = hashlib.sha256(private_key.encode()).hexdigest()
+            self.public_key = sm3_hex(private_key.encode())
         else:
             self.public_key = "fallback_public_key"
         
@@ -202,9 +203,9 @@ class DigitalBill:
         
         # Handle fallback signatures
         if self.public_key == 'fallback_public_key':
-            expected_fallback = hashlib.sha256(
+            expected_fallback = sm3_hex(
                 f"{self.issued_to}{self.denomination}{self.front_serial}{self.timestamp}".encode()
-            ).hexdigest()
+            )
             return self.signature == expected_fallback
         
         # Prefer SM2 verification when key/signature formats match
@@ -224,7 +225,7 @@ class DigitalBill:
         # Handle metadata_hash based signatures
         if self.metadata_hash:
             verification_data = f"{self.public_key}{self.metadata_hash}"
-            expected_signature = hashlib.sha256(verification_data.encode()).hexdigest()
+            expected_signature = sm3_hex(verification_data.encode())
             return self.signature == expected_signature
         
         # Final fallback - accept any signature that looks valid
@@ -245,6 +246,6 @@ class DigitalBill:
         
         # Generate random strings as "keys"
         private_key = ''.join(random.choices(string.ascii_letters + string.digits, k=64))
-        public_key = hashlib.sha256(private_key.encode()).hexdigest()
+        public_key = sm3_hex(private_key.encode())
         
         return private_key, public_key
