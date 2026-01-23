@@ -30,7 +30,7 @@ def _refresh_tx_caches(self):
     from lunalib.core.mempool import MempoolManager
     blockchain = BlockchainManager()
     mempool = MempoolManager()
-    cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
+    cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
     max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
     confirmed = blockchain.scan_transactions_for_address_filtered(
         self.current_wallet_address,
@@ -289,8 +289,8 @@ class LunaWallet:
             from lunalib.core.blockchain import BlockchainManager
 
             blockchain = BlockchainManager()
-            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
             confirmed = blockchain.scan_transactions_for_address_filtered(
                 addr,
                 include_rewards=True,
@@ -715,8 +715,8 @@ class LunaWallet:
 
             blockchain = BlockchainManager()
             mempool = MempoolManager()
-            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
 
             confirmed_map = blockchain.scan_transactions_for_addresses_filtered(
                 addresses,
@@ -937,7 +937,7 @@ class LunaWallet:
             from lunalib.core.blockchain import BlockchainManager
 
             blockchain = BlockchainManager()
-            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
+            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
             max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
             transactions = blockchain.scan_transactions_for_address_filtered(
                 self.address,
@@ -1161,7 +1161,12 @@ class LunaWallet:
                 # Default save location
                 import os
 
-                wallet_dir = os.path.expanduser("~/.lunawallet")
+                from lunalib.storage.database import get_default_wallet_dir
+                legacy_dir = os.path.expanduser("~/.lunawallet")
+                if os.path.isdir(legacy_dir):
+                    wallet_dir = legacy_dir
+                else:
+                    wallet_dir = os.path.join(get_default_wallet_dir(), "wallets")
                 os.makedirs(wallet_dir, exist_ok=True)
                 save_path = os.path.join(wallet_dir, f"{self.address}.json")
 
@@ -1195,8 +1200,16 @@ class LunaWallet:
                 # Try to find wallet file
                 import os
 
-                wallet_dir = os.path.expanduser("~/.lunawallet")
+                from lunalib.storage.database import get_default_wallet_dir
+                legacy_dir = os.path.expanduser("~/.lunawallet")
+                if os.path.isdir(legacy_dir):
+                    wallet_dir = legacy_dir
+                else:
+                    wallet_dir = os.path.join(get_default_wallet_dir(), "wallets")
                 # Look for any .json file
+                if not os.path.isdir(wallet_dir):
+                    print("[WALLET] No wallet file found")
+                    return False
                 wallet_files = [
                     f for f in os.listdir(wallet_dir) if f.endswith(".json")
                 ]
@@ -1267,8 +1280,8 @@ class LunaWallet:
                 from lunalib.core.mempool import MempoolManager
 
                 blockchain = BlockchainManager()
-                cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-                max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+                cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+                max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
                 mempool = MempoolManager()
 
                 # Get confirmed transactions from blockchain (includes mining rewards)
@@ -1366,8 +1379,8 @@ class LunaWallet:
                 from lunalib.core.blockchain import BlockchainManager
 
                 blockchain = BlockchainManager()
-                cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-                max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+                cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+                max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
                 confirmed_txs = blockchain.scan_transactions_for_address_filtered(
                     address,
                     include_rewards=True,
@@ -1598,8 +1611,8 @@ class LunaWallet:
             lookback = int(os.getenv("LUNALIB_WALLET_SYNC_LOOKBACK", "50"))
             if lookback < 0:
                 lookback = 0
-            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
             if end_height <= state_manager.last_blockchain_height:
                 if lookback > 0:
                     start_height = max(0, end_height - lookback + 1)

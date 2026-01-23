@@ -71,8 +71,8 @@ class WalletSyncHelper:
             lookback = int(os.getenv("LUNALIB_WALLET_SYNC_LOOKBACK", "50"))
             if lookback < 0:
                 lookback = 0
-            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+            cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+            max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
             if end_height <= self.state_manager.last_blockchain_height:
                 if lookback > 0:
                     start_height = max(0, end_height - lookback + 1)
@@ -155,8 +155,8 @@ class WalletSyncHelper:
                 lookback = int(os.getenv("LUNALIB_WALLET_SYNC_LOOKBACK", "50"))
                 if lookback < 0:
                     lookback = 0
-                cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "1") == "1"
-                max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "500"))
+                cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
+                max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
                 if end_height <= self.state_manager.last_blockchain_height:
                     if lookback > 0:
                         start_height = max(0, end_height - lookback + 1)

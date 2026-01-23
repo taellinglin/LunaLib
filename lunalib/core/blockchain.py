@@ -61,6 +61,47 @@ class BlockchainManager:
             or block.get('blockReward')
         )
         return self._parse_amount(reward_raw or 0)
+
+    def _unwrap_block_response(self, payload: Dict) -> Dict:
+        """Unwrap block payloads that nest the block under known keys."""
+        if not isinstance(payload, dict):
+            return payload
+        if isinstance(payload.get('block'), dict):
+            return payload.get('block')
+        if isinstance(payload.get('data'), dict):
+            return payload.get('data')
+        if isinstance(payload.get('result'), dict):
+            return payload.get('result')
+        return payload
+
+    def _get_block_transactions_raw(self, block: Dict):
+        """Return the raw transactions container from common block shapes."""
+        if 'transactions' in block:
+            return block.get('transactions')
+        if 'txs' in block:
+            return block.get('txs')
+        data = block.get('data') if isinstance(block.get('data'), dict) else None
+        if data:
+            if 'transactions' in data:
+                return data.get('transactions')
+            if 'txs' in data:
+                return data.get('txs')
+        inner = block.get('block') if isinstance(block.get('block'), dict) else None
+        if inner:
+            if 'transactions' in inner:
+                return inner.get('transactions')
+            if 'txs' in inner:
+                return inner.get('txs')
+        return None
+
+    def _extract_block_transactions(self, block: Dict) -> List[Dict]:
+        """Extract a list of transaction dicts from a block (supports alternate shapes)."""
+        raw = self._get_block_transactions_raw(block)
+        if isinstance(raw, list):
+            return [tx for tx in raw if isinstance(tx, dict)]
+        if isinstance(raw, dict):
+            return [tx for tx in raw.values() if isinstance(tx, dict)]
+        return []
         
     def broadcast_transaction_async(self, transaction: Dict, callback: Callable = None) -> str:
         """Async version: Broadcast transaction in background thread
@@ -327,10 +368,11 @@ class BlockchainManager:
         tx_type = str(tx.get("type") or "").lower()
         desc = str(tx.get("description") or "").lower()
         return (
-            tx_type in {"reward", "coinbase", "mining_reward"}
+            tx_type in {"reward", "coinbase", "mining_reward", "mining", "block_reward"}
             or str(tx.get("hash", "")).startswith("reward_")
             or (str(tx.get("from", "")) == "network" and ("reward" in desc or "mining" in desc))
             or (str(tx.get("from", "")) == "network" and tx.get("block_height") is not None)
+            or (str(tx.get("from", "")) == "network" and tx.get("difficulty") is not None)
             or ("reward" in tx)
         )
 
@@ -371,31 +413,20 @@ class BlockchainManager:
             print(f"Get blocks list error: {e}")
         return []
 
-    def get_block_by_height(self, height: int) -> Optional[Dict]:
+    def get_block_by_height(self, height: int, force_refresh: bool = False) -> Optional[Dict]:
         """Get block by height (index)"""
         # Check cache first
-        cached_block = self.cache.get_block(height)
-        if cached_block:
-            return cached_block
+        if not force_refresh:
+            cached_block = self.cache.get_block(height)
+            if cached_block:
+                return cached_block
 
         try:
-            response = self._session.get(f'{self.endpoint_url}/blockchain/block/{height}', timeout=10)
+            response = self._session.get(f'{self.endpoint_url}/get_block/{height}', timeout=10)
             if response.status_code == 200:
-                block = response.json()
+                block = self._unwrap_block_response(response.json())
                 self.cache.save_block(height, block.get('hash', ''), block)
                 return block
-            if response.status_code == 404:
-                # Fallback: some servers expect hash at /blockchain/block/<value>
-                blocks = self._fetch_blocks_list()
-                if 0 <= height < len(blocks):
-                    block = blocks[height]
-                    self.cache.save_block(height, block.get('hash', ''), block)
-                    return block
-                for block in blocks:
-                    block_index = block.get('index') if isinstance(block, dict) else None
-                    if block_index == height:
-                        self.cache.save_block(height, block.get('hash', ''), block)
-                        return block
         except Exception as e:
             print(f"Get block error: {e}")
 
@@ -407,9 +438,9 @@ class BlockchainManager:
             return None
 
         try:
-            response = self._session.get(f'{self.endpoint_url}/blockchain/block/{block_hash}', timeout=10)
+            response = self._session.get(f'{self.endpoint_url}/get_block/{block_hash}', timeout=10)
             if response.status_code == 200:
-                block = response.json()
+                block = self._unwrap_block_response(response.json())
                 height = block.get('index', block.get('height'))
                 if isinstance(height, int):
                     self.cache.save_block(height, block.get('hash', ''), block)
@@ -417,28 +448,19 @@ class BlockchainManager:
         except Exception as e:
             print(f"Get block by hash error: {e}")
 
-        # Fallback: scan blocks list
-        blocks = self._fetch_blocks_list()
-        for block in blocks:
-            if isinstance(block, dict) and block.get('hash') == block_hash:
-                height = block.get('index', block.get('height'))
-                if isinstance(height, int):
-                    self.cache.save_block(height, block.get('hash', ''), block)
-                return block
-
         return None
 
-    def get_block(self, block_id: Union[int, str]) -> Optional[Dict]:
+    def get_block(self, block_id: Union[int, str], force_refresh: bool = False) -> Optional[Dict]:
         """Get block by height (int) or hash (str)."""
         if isinstance(block_id, str):
             value = block_id.strip()
             if self._looks_like_hash(value):
                 return self.get_block_by_hash(value)
             if value.isdigit():
-                return self.get_block_by_height(int(value))
+                return self.get_block_by_height(int(value), force_refresh=force_refresh)
             return self.get_block_by_hash(value)
 
-        return self.get_block_by_height(int(block_id))
+        return self.get_block_by_height(int(block_id), force_refresh=force_refresh)
     
     def get_blocks_range_async(self, start_height: int, end_height: int, callback: Callable = None) -> str:
         """Async version: Get range of blocks in background thread
@@ -507,11 +529,12 @@ class BlockchainManager:
                 )
                 if response.status_code == 200:
                     blocks = response.json().get('blocks', [])
-                    # Cache the blocks
-                    for block in blocks:
-                        height = block.get('index', 0)
-                        self.cache.save_block(height, block.get('hash', ''), block)
-                    return blocks
+                    if blocks:
+                        # Cache the blocks
+                        for block in blocks:
+                            height = block.get('index', 0)
+                            self.cache.save_block(height, block.get('hash', ''), block)
+                        return blocks
 
             # Fallback: fetch missing blocks individually (optionally in parallel)
             fetch_delay = float(os.getenv("LUNALIB_BLOCK_FETCH_DELAY", "0"))
@@ -526,9 +549,9 @@ class BlockchainManager:
                 if fetch_delay > 0:
                     time.sleep(fetch_delay)
                 try:
-                    response = requests.get(f'{self.endpoint_url}/blockchain/block/{height}', timeout=10)
+                    response = requests.get(f'{self.endpoint_url}/get_block/{height}', timeout=10)
                     if response.status_code == 200:
-                        block = response.json()
+                        block = self._unwrap_block_response(response.json())
                         self.cache.save_block(height, block.get('hash', ''), block)
                         return block
                 except Exception:
@@ -628,7 +651,33 @@ class BlockchainManager:
                         continue
 
                 height = block.get('index', block.get('height'))
-                has_txs = isinstance(block.get('transactions'), list)
+                txs_raw = self._get_block_transactions_raw(block)
+                empty_hint = bool(
+                    block.get('is_empty_block')
+                    or block.get('empty_block')
+                    or block.get('empty')
+                    or block.get('isEmptyBlock')
+                    or block.get('emptyBlock')
+                )
+                tx_count_hint = (
+                    block.get('transaction_count')
+                    or block.get('transactions_count')
+                    or block.get('tx_count')
+                    or block.get('num_transactions')
+                    or block.get('n_transactions')
+                    or block.get('transactionsCount')
+                )
+                txs = self._extract_block_transactions(block)
+                has_txs = isinstance(txs_raw, (list, dict))
+                if isinstance(txs_raw, list) and txs_raw and not isinstance(txs_raw[0], dict):
+                    has_txs = False
+                if isinstance(txs_raw, list) and len(txs_raw) == 0 and not empty_hint:
+                    has_txs = False
+                if tx_count_hint is not None:
+                    try:
+                        has_txs = has_txs and (int(tx_count_hint) <= len(txs))
+                    except Exception:
+                        pass
                 has_meta = bool(self._extract_miner_address(block)) or (self._extract_reward_amount(block) > 0)
                 if not skip_full_fetch and (not has_txs or not has_meta):
                     full_block = None
@@ -637,7 +686,7 @@ class BlockchainManager:
                             full_block = self.cache.get_block(height)
                     else:
                         if isinstance(height, int):
-                            full_block = self.get_block(height)
+                            full_block = self.get_block_by_height(height, force_refresh=True)
                         elif block.get('hash'):
                             full_block = self.get_block(block.get('hash'))
                     if isinstance(full_block, dict):
@@ -758,7 +807,33 @@ class BlockchainManager:
                         continue
 
                 height = block.get('index', block.get('height'))
-                has_txs = isinstance(block.get('transactions'), list)
+                txs_raw = self._get_block_transactions_raw(block)
+                empty_hint = bool(
+                    block.get('is_empty_block')
+                    or block.get('empty_block')
+                    or block.get('empty')
+                    or block.get('isEmptyBlock')
+                    or block.get('emptyBlock')
+                )
+                tx_count_hint = (
+                    block.get('transaction_count')
+                    or block.get('transactions_count')
+                    or block.get('tx_count')
+                    or block.get('num_transactions')
+                    or block.get('n_transactions')
+                    or block.get('transactionsCount')
+                )
+                txs = self._extract_block_transactions(block)
+                has_txs = isinstance(txs_raw, (list, dict))
+                if isinstance(txs_raw, list) and txs_raw and not isinstance(txs_raw[0], dict):
+                    has_txs = False
+                if isinstance(txs_raw, list) and len(txs_raw) == 0 and not empty_hint:
+                    has_txs = False
+                if tx_count_hint is not None:
+                    try:
+                        has_txs = has_txs and (int(tx_count_hint) <= len(txs))
+                    except Exception:
+                        pass
                 has_meta = bool(self._extract_miner_address(block)) or (self._extract_reward_amount(block) > 0)
                 if not skip_full_fetch and (not has_txs or not has_meta):
                     full_block = None
@@ -767,7 +842,7 @@ class BlockchainManager:
                             full_block = self.cache.get_block(height)
                     else:
                         if isinstance(height, int):
-                            full_block = self.get_block(height)
+                            full_block = self.get_block_by_height(height, force_refresh=True)
                         elif block.get('hash'):
                             full_block = self.get_block(block.get('hash'))
                     if isinstance(full_block, dict):
@@ -1248,42 +1323,26 @@ class BlockchainManager:
     def _collect_transactions_for_addresses(self, block: Dict, normalized_map: Dict[str, str]) -> Dict[str, List[Dict]]:
         """Collect transactions in a block for multiple addresses in one pass."""
         results: Dict[str, List[Dict]] = {original: [] for original in normalized_map.values()}
-
-        # Mining reward via block metadata (support aliases)
         miner_raw = self._extract_miner_address(block)
         miner_norm = self._normalize_address(miner_raw or '')
-        if miner_norm in normalized_map:
-            reward_amount = self._extract_reward_amount(block)
-            if reward_amount > 0:
-                target_addr = normalized_map[miner_norm]
-                reward_tx = {
-                    'type': 'reward',
-                    'from': 'network',
-                    'to': target_addr,
-                    'amount': reward_amount,
-                    'block_height': block.get('index'),
-                    'timestamp': block.get('timestamp'),
-                    'hash': f"reward_{block.get('index')}_{block.get('hash', '')[:8]}",
-                    'status': 'confirmed',
-                    'description': f"Mining reward for block #{block.get('index')}",
-                    'direction': 'incoming',
-                    'effective_amount': reward_amount,
-                    'fee': 0
-                }
-                results[target_addr].append(reward_tx)
+        miner_addr = normalized_map.get(miner_norm)
+        explicit_reward_found = False
 
         # Regular transactions
-        for tx_index, tx in enumerate(block.get('transactions', [])):
+        for tx_index, tx in enumerate(self._extract_block_transactions(block)):
+            if not isinstance(tx, dict):
+                continue
             tx_type = (tx.get('type') or 'transfer').lower()
             from_norm = self._normalize_address(tx.get('from') or tx.get('sender') or '')
             to_norm = self._normalize_address(tx.get('to') or tx.get('receiver') or '')
 
             desc = str(tx.get('description', '') or '').lower()
             reward_hint = (
-                tx_type in {'reward', 'coinbase', 'mining_reward'}
+                tx_type in {'reward', 'coinbase', 'mining_reward', 'mining', 'block_reward'}
                 or (tx.get('hash', '') or '').startswith('reward_')
                 or (tx.get('from') == 'network' and ('reward' in desc or 'mining' in desc))
                 or (tx.get('from') == 'network' and tx.get('block_height') is not None)
+                or (tx.get('from') == 'network' and tx.get('difficulty') is not None)
                 or ('reward' in tx)
             )
 
@@ -1307,6 +1366,8 @@ class BlockchainManager:
                     })
                     enhanced.setdefault('from', 'network')
                     results[target_addr].append(enhanced)
+                    if miner_addr and target_addr == miner_addr:
+                        explicit_reward_found = True
                     continue
 
             # Incoming transfer
@@ -1342,6 +1403,26 @@ class BlockchainManager:
                     'fee': fee
                 })
                 results[target_addr].append(enhanced)
+
+        # Mining reward via block metadata (support aliases) only if no explicit reward tx was found
+        if miner_addr and not explicit_reward_found:
+            reward_amount = self._extract_reward_amount(block)
+            if reward_amount > 0:
+                reward_tx = {
+                    'type': 'reward',
+                    'from': 'network',
+                    'to': miner_addr,
+                    'amount': reward_amount,
+                    'block_height': block.get('index'),
+                    'timestamp': block.get('timestamp'),
+                    'hash': f"reward_{block.get('index')}_{block.get('hash', '')[:8]}",
+                    'status': 'confirmed',
+                    'description': f"Mining reward for block #{block.get('index')}",
+                    'direction': 'incoming',
+                    'effective_amount': reward_amount,
+                    'fee': 0
+                }
+                results[miner_addr].append(reward_tx)
 
         # Trim empty entries
         return {addr: txs for addr, txs in results.items() if txs}
@@ -1383,37 +1464,18 @@ class BlockchainManager:
         print(f"   Miner normalized: '{miner_normalized}'")
         print(f"   Address normalized: '{address_normalized}'")
         
-        # Check if this block was mined by our address
-        if miner_normalized == address_normalized and miner_normalized:
-            reward_amount = self._extract_reward_amount(block)
-            if reward_amount > 0:
-                reward_tx = {
-                    'type': 'reward',
-                    'from': 'network',
-                    'to': address,
-                    'amount': reward_amount,
-                    'block_height': block.get('index'),
-                    'timestamp': block.get('timestamp'),
-                    'hash': f"reward_{block.get('index')}_{block.get('hash', '')[:8]}",
-                    'status': 'confirmed',
-                    'description': f'Mining reward for block #{block.get("index")}',
-                    'direction': 'incoming',
-                    'effective_amount': reward_amount,
-                    'fee': 0
-                }
-                transactions.append(reward_tx)
-                print(f"🎁 FOUND MINING REWARD: {reward_amount} LUN for block #{block.get('index')}")
-                print(f"   Miner match: '{miner_clean}' == '{address}'")
-        else:
-            print(f"   Not our block - Miner: '{miner_clean}', Our address: '{address}'")
+        metadata_reward_applicable = miner_normalized == address_normalized and miner_normalized
+        explicit_reward_found = False
         
         # ==================================================================
         # 2. CHECK ALL TRANSACTIONS IN THE BLOCK
         # ==================================================================
-        block_transactions = block.get('transactions', [])
+        block_transactions = self._extract_block_transactions(block)
         print(f"   Block has {len(block_transactions)} transactions")
         
         for tx_index, tx in enumerate(block_transactions):
+            if not isinstance(tx, dict):
+                continue
             enhanced_tx = tx.copy()
             enhanced_tx['block_height'] = block.get('index')
             enhanced_tx['status'] = 'confirmed'
@@ -1438,7 +1500,7 @@ class BlockchainManager:
             # A) REWARD TRANSACTIONS (explicit reward transactions)
             # ==================================================================
             tx_type = tx.get('type', 'transfer').lower()
-            if tx_type in {'reward', 'coinbase', 'mining_reward'}:
+            if tx_type in {'reward', 'coinbase', 'mining_reward', 'mining', 'block_reward'}:
                 reward_to_address = tx.get('to') or tx.get('receiver') or tx.get('issued_to') or tx.get('owner_address') or tx.get('to_address') or ''
                 # Compare the reward's destination with our wallet address
                 if addresses_match(reward_to_address, address):
@@ -1448,8 +1510,22 @@ class BlockchainManager:
                     enhanced_tx['fee'] = 0
                     enhanced_tx.setdefault('from', 'network') # Ensure sender is set
                     transactions.append(enhanced_tx)
+                    explicit_reward_found = True
                     print(f"✅ Found mining reward: {amount} LUN (to: {reward_to_address})")
                     continue  # Move to next transaction
+            if tx.get('from') == 'network':
+                reward_to_address = tx.get('to') or tx.get('receiver') or tx.get('issued_to') or tx.get('owner_address') or tx.get('to_address') or ''
+                if addresses_match(reward_to_address, address) and (tx.get('difficulty') is not None or 'reward' in str(tx.get('description', '')).lower()):
+                    amount = self._parse_amount(tx.get('amount', tx.get('denomination', tx.get('reward', 0)) or 0))
+                    enhanced_tx['direction'] = 'incoming'
+                    enhanced_tx['effective_amount'] = amount
+                    enhanced_tx['amount'] = amount
+                    enhanced_tx['fee'] = 0
+                    enhanced_tx.setdefault('type', 'reward')
+                    transactions.append(enhanced_tx)
+                    explicit_reward_found = True
+                    print(f"✅ Found network reward: {amount} LUN (to: {reward_to_address})")
+                    continue
             
             # ==================================================================
             # B) REGULAR TRANSFERS
@@ -1484,6 +1560,31 @@ class BlockchainManager:
                 
                 transactions.append(enhanced_tx)
                 print(f"⬇️ Found outgoing transaction: {amount} LUN + {fee} fee")
+
+        if metadata_reward_applicable and not explicit_reward_found:
+            reward_amount = self._extract_reward_amount(block)
+            if reward_amount > 0:
+                reward_tx = {
+                    'type': 'reward',
+                    'from': 'network',
+                    'to': address,
+                    'amount': reward_amount,
+                    'block_height': block.get('index'),
+                    'timestamp': block.get('timestamp'),
+                    'hash': f"reward_{block.get('index')}_{block.get('hash', '')[:8]}",
+                    'status': 'confirmed',
+                    'description': f'Mining reward for block #{block.get("index")}',
+                    'direction': 'incoming',
+                    'effective_amount': reward_amount,
+                    'fee': 0
+                }
+                transactions.append(reward_tx)
+                print(f"🎁 FOUND MINING REWARD: {reward_amount} LUN for block #{block.get('index')}")
+                print(f"   Miner match: '{miner_clean}' == '{address}'")
+        elif metadata_reward_applicable:
+            print(f"   Reward tx already present for block #{block.get('index')}")
+        else:
+            print(f"   Not our block - Miner: '{miner_clean}', Our address: '{address}'")
         
         print(f" Scan complete for block #{block.get('index')}: {len(transactions)} transactions found")
         return transactions

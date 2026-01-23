@@ -277,6 +277,16 @@ class BlockchainDaemon:
             reward_tx = next((tx for tx in transactions if tx.get('type') == 'reward'), None)
             non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
             is_empty_block = not non_reward_txs or (len(transactions) == 1 and reward_tx and reward_tx.get('is_empty_block', False))
+
+            fees_total = 0.0
+            for tx in non_reward_txs:
+                try:
+                    fee_value = tx.get('fee', None)
+                    if fee_value is None:
+                        fee_value = tx.get('gas', 0)
+                    fees_total += self._parse_amount(fee_value or 0)
+                except Exception:
+                    continue
             
             if is_empty_block:
                 # Empty block: linear reward (difficulty 1 = 1 LKC, difficulty 2 = 2 LKC, etc.)
@@ -291,6 +301,9 @@ class BlockchainDaemon:
                 else:
                     expected_reward = self.difficulty_system.calculate_block_reward(difficulty)
                     reward_type = "Exponential"
+
+            if fees_total > 0:
+                expected_reward += fees_total
             
             reward_tx_amount = self._parse_amount(reward_tx.get('amount', 0)) if reward_tx else None
             actual_reward = self._parse_amount(block.get('reward', reward_tx_amount if reward_tx_amount is not None else 0))

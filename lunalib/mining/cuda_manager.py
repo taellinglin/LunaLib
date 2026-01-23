@@ -1,6 +1,7 @@
 import time
 import os
 import struct
+import threading
 from typing import Optional, Dict, Any, Callable
 import json
 from lunalib.utils.hash import sm3_hex
@@ -30,9 +31,18 @@ class CUDAManager:
         self.last_hashrate = 0.0
         self.last_attempts = 0
         self.last_duration = 0.0
+        self._stop_event = threading.Event()
         self.cuda_available = self._check_cuda()
         if self.cuda_available:
             self._initialize_cuda_multi()
+
+    def abort(self) -> None:
+        """Request CUDA mining to stop (best-effort)."""
+        self._stop_event.set()
+
+    def reset_abort(self) -> None:
+        """Clear CUDA abort signal."""
+        self._stop_event.clear()
     
     def _check_cuda(self) -> bool:
         """Check if CUDA is available"""
@@ -66,12 +76,16 @@ class CUDAManager:
             self.cuda_available = False
 
     def cuda_mine_multi_gpu_batch(self, mining_data: Dict, difficulty: int, batch_size: int = 1000000,
-                                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict]:
+                                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                                  stop_event: Optional[threading.Event] = None) -> Optional[Dict]:
         """Mine using all available CUDA devices in parallel"""
         import threading
         if not self.cuda_available or self.device_count < 2:
             print("[CUDA_DIAG] Multi-GPU requested but less than 2 devices available. Falling back to single GPU.")
-            return self.cuda_mine_batch(mining_data, difficulty, batch_size, progress_callback)
+            return self.cuda_mine_batch(mining_data, difficulty, batch_size, progress_callback, stop_event=stop_event)
+
+        if stop_event is None:
+            stop_event = self._stop_event
 
         result_holder = {}
         stop_flag = threading.Event()
@@ -121,6 +135,7 @@ class CUDAManager:
                     progress_callback,
                     start_nonce=start_nonce,
                     nonce_stride=total_batch,
+                    stop_event=stop_event,
                 )
                 if res and res.get("success"):
                     result_holder["result"] = res
@@ -135,6 +150,9 @@ class CUDAManager:
             t.start()
 
         while not stop_flag.is_set():
+            if stop_event and stop_event.is_set():
+                stop_flag.set()
+                break
             for t in threads:
                 t.join(timeout=0.1)
         # Stop all threads once a result is found
@@ -144,12 +162,15 @@ class CUDAManager:
     def cuda_mine_batch(self, mining_data: Dict, difficulty: int, batch_size: int = 1000000,
                         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                         start_nonce: int = 0,
-                        nonce_stride: Optional[int] = None) -> Optional[Dict]:
+                        nonce_stride: Optional[int] = None,
+                        stop_event: Optional[threading.Event] = None) -> Optional[Dict]:
         """Mine using CUDA acceleration with CPU-side hash computation"""
         print("[CUDA_DIAG] Entered cuda_mine_batch")
         if not self.cuda_available:
             print("[CUDA_DIAG] cuda_available is False, returning None")
             return None
+        if stop_event is None:
+            stop_event = self._stop_event
         try:
             print(f"[CUDA_DIAG] mining_data={mining_data}, difficulty={difficulty}, batch_size={batch_size}, start_nonce={start_nonce}")
             target = "0" * difficulty
@@ -183,6 +204,9 @@ class CUDAManager:
             loop_count = 0
             attempts = 0
             while True:
+                if stop_event and stop_event.is_set():
+                    print("[CUDA_DIAG] Stop requested; aborting CUDA mining.")
+                    return None
                 loop_count += 1
                 if loop_count % 10 == 0:
                     print(f"[CUDA_DIAG] Loop iteration {loop_count}, nonce_start={nonce_start}")

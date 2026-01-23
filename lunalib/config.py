@@ -16,6 +16,7 @@ PROFILES: Dict[str, Dict[str, str]] = {
         "LUNALIB_CUDA_BLOCKS": "65536",
         "LUNALIB_CUDA_ITERS": "64",
         "LUNALIB_MINING_HASH_MODE": "compact",
+        "LUNALIB_LOAD_BALANCE": "prefer_gpu",
         "LUNALIB_WALLET_SYNC_LOOKBACK": "200",
         "LUNALIB_WALLET_CIPHER": "sm4",
         "LUNALIB_SM4_USE_GPU": "1",
@@ -25,6 +26,11 @@ PROFILES: Dict[str, Dict[str, str]] = {
         "LUNALIB_SM4_MIN_BLOCKS": "8",
         "LUNALIB_SM4_XOR_MIN_BYTES": "4096",
         "LUNALIB_SM4_GPU_CHUNK_BYTES": "0",
+        "LUNALIB_CPU_WORKERS": "32",
+        "LUNALIB_CPU_C_CHUNK": "5000000",
+        "LUNALIB_CPU_MAX_NONCE": "200000000",
+        "LUNALIB_CPU_PINNING": "1",
+        "LUNALIB_CPU_PIN_LIST": "0-31",
     }
 }
 

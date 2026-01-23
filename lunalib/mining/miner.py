@@ -2,6 +2,8 @@
 import time
 import sys
 import os
+import ctypes
+import copy
 # --- Unicode-safe print for Windows console ---
 def safe_print(*args, **kwargs):
     try:
@@ -11,7 +13,7 @@ def safe_print(*args, **kwargs):
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 import hashlib
 import struct
-from lunalib.core.sm3 import sm3_hex, sm3_digest
+from lunalib.core.sm3 import sm3_hex, sm3_digest, sm3_compact_hash, sm3_mine_compact, sm3_set_abort
 import json
 import threading
 from typing import Dict, Optional, List, Union, Callable
@@ -21,6 +23,82 @@ from ..transactions.transactions import TransactionManager
 from ..core.blockchain import BlockchainManager
 from ..core.mempool import MempoolManager
 from ..mining.cuda_manager import CUDAManager
+
+
+def _parse_cpu_list(value: str | None) -> List[int]:
+    if not value:
+        return []
+    cores: List[int] = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_str, end_str = part.split("-", 1)
+            try:
+                start = int(start_str)
+                end = int(end_str)
+            except ValueError:
+                continue
+            if end < start:
+                start, end = end, start
+            cores.extend(range(start, end + 1))
+        else:
+            try:
+                cores.append(int(part))
+            except ValueError:
+                continue
+    return [c for c in cores if c >= 0]
+
+
+def _pin_current_thread(core_id: int) -> bool:
+    if core_id < 0:
+        return False
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            mask = ctypes.c_size_t(1 << core_id)
+            handle = kernel32.GetCurrentThread()
+            result = kernel32.SetThreadAffinityMask(handle, mask)
+            return bool(result)
+        except Exception:
+            return False
+    if hasattr(os, "sched_setaffinity"):
+        try:
+            os.sched_setaffinity(0, {core_id})
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _get_linux_numa_cpulist(node: int) -> List[int]:
+    path = f"/sys/devices/system/node/node{node}/cpulist"
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return _parse_cpu_list(handle.read().strip())
+    except Exception:
+        return []
+
+
+def _get_windows_numa_cpulist(node: int) -> List[int]:
+    try:
+        kernel32 = ctypes.windll.kernel32
+        mask = ctypes.c_ulonglong()
+        if not kernel32.GetNumaNodeProcessorMask(ctypes.c_ubyte(node), ctypes.byref(mask)):
+            return []
+        value = mask.value
+        return [i for i in range(64) if (value >> i) & 1]
+    except Exception:
+        return []
+
+
+def _get_numa_cpulist(node: int) -> List[int]:
+    if os.name == "nt":
+        return _get_windows_numa_cpulist(node)
+    if os.name == "posix":
+        return _get_linux_numa_cpulist(node)
+    return []
 
 class GenesisMiner:
     """Mines GTX Genesis bills AND regular transfer transactions with configurable difficulty"""
@@ -45,6 +123,10 @@ class GenesisMiner:
     def mine_bill(self, denomination: float, user_address: str, bill_data: Dict = None) -> Dict:
         """Mine a GTX Genesis bill using DigitalBill system"""
         try:
+            enforced = os.getenv("LUNALIB_MINER_ADDRESS")
+            if enforced and user_address and user_address != enforced:
+                safe_print("[WARN] Miner address override denied; using configured miner address.")
+                user_address = enforced
             if denomination not in [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000]:
                 return {"success": False, "error": "Invalid denomination"}
 
@@ -103,6 +185,10 @@ class GenesisMiner:
     def mine_transaction_block(self, miner_address: str, previous_hash: str = None, block_height: int = None) -> Dict:
         """Mine a block containing transactions from mempool"""
         try:
+            enforced = os.getenv("LUNALIB_MINER_ADDRESS")
+            if enforced and miner_address and miner_address != enforced:
+                safe_print("[WARN] Miner address override denied; using configured miner address.")
+                miner_address = enforced
             # Get current blockchain state if not provided
             if previous_hash is None or block_height is None:
                 current_height = self.blockchain_manager.get_blockchain_height()
@@ -484,6 +570,10 @@ class GenesisMiner:
         if self.mining_active:
             print("Mining already active")
             return False
+        enforced = os.getenv("LUNALIB_MINER_ADDRESS")
+        if enforced and user_address and user_address != enforced:
+            safe_print("[WARN] Miner address override denied; using configured miner address.")
+            user_address = enforced
             
         self.mining_active = True
         
@@ -516,6 +606,10 @@ class GenesisMiner:
         if self.mining_active:
             print("⚠️ Mining already active")
             return False
+        enforced = os.getenv("LUNALIB_MINER_ADDRESS")
+        if enforced and miner_address and miner_address != enforced:
+            safe_print("[WARN] Miner address override denied; using configured miner address.")
+            miner_address = enforced
             
         self.mining_active = True
         
@@ -558,6 +652,10 @@ class GenesisMiner:
         if self.mining_active:
             print("Mining already active")
             return False
+        enforced = os.getenv("LUNALIB_MINER_ADDRESS")
+        if enforced and miner_address and miner_address != enforced:
+            safe_print("[WARN] Miner address override denied; using configured miner address.")
+            miner_address = enforced
             
         self.mining_active = True
         
@@ -697,16 +795,58 @@ class Miner:
         self.is_mining = False
         self.blocks_mined = 0
         self.total_reward = 0.0
+        self.miner_address = getattr(config, "miner_address", "") or os.getenv("LUNALIB_MINER_ADDRESS", "")
         self.mining_started_callback = mining_started_callback
         self.mining_completed_callback = mining_completed_callback
         self.block_mined_callback = block_mined_callback
         self.block_added_callback = block_added_callback  # 新規: ブロックがチェーンに追加された時のコールバック
         self.mining_status_callbacks: List[Callable] = []
 
+        # Mining performance defaults
+        env_cpu_workers = os.getenv("LUNALIB_CPU_WORKERS")
+        config_cpu_workers = getattr(config, "cpu_workers", None)
+        if env_cpu_workers is not None:
+            try:
+                self.set_cpu_workers(int(env_cpu_workers))
+            except Exception:
+                self.set_cpu_workers(os.cpu_count() or 1)
+        elif config_cpu_workers is not None:
+            self.set_cpu_workers(config_cpu_workers)
+        else:
+            self.set_cpu_workers(os.cpu_count() or 1)
+
+        env_cpu_max_nonce = os.getenv("LUNALIB_CPU_MAX_NONCE")
+        config_cpu_max_nonce = getattr(config, "cpu_max_nonce", None)
+        try:
+            if env_cpu_max_nonce is not None:
+                self.cpu_max_nonce = int(env_cpu_max_nonce)
+            elif config_cpu_max_nonce is not None:
+                self.cpu_max_nonce = int(config_cpu_max_nonce)
+            else:
+                self.cpu_max_nonce = 200_000_000
+        except Exception:
+            self.cpu_max_nonce = 200_000_000
+
+        env_hash_mode = os.getenv("LUNALIB_MINING_HASH_MODE")
+        config_hash_mode = getattr(config, "mining_hash_mode", None)
+        self.mining_hash_mode = (env_hash_mode or config_hash_mode or "compact").lower()
+
+        env_balance_mode = os.getenv("LUNALIB_LOAD_BALANCE")
+        config_balance_mode = getattr(config, "load_balance_mode", None)
+        self.load_balance_mode = (env_balance_mode or config_balance_mode or "prefer_gpu").lower()
+
+        env_cpu_c_chunk = os.getenv("LUNALIB_CPU_C_CHUNK")
+        try:
+            self.cpu_c_chunk = int(env_cpu_c_chunk) if env_cpu_c_chunk else 200_000
+        except Exception:
+            self.cpu_c_chunk = 200_000
+
         self.mining_history = self._merge_mining_history(self.data_manager.load_mining_history())
 
         # Ensure hashrate_callback is always defined
         self.hashrate_callback = None
+        self.cpu_hashrate_callbacks: List[Callable] = []
+        self.gpu_hashrate_callbacks: List[Callable] = []
 
         # Mining engine toggles (default to enabled when unspecified)
         def _resolve_flag(flag_names: tuple[str, ...], default: bool) -> bool:
@@ -765,6 +905,230 @@ class Miner:
         self._last_hashing_status = 0.0
         self._reward_mode_cache = {"mode": None, "ts": 0.0}
         self.peak_hashrate = 0.0
+        self.mined_rewards: List[Dict] = []
+        self.mined_bills: List[Dict] = []
+        self.mined_blocks: List[Dict] = []
+        self._mined_rewards_limit = int(os.getenv("LUNALIB_MINER_REWARD_CACHE_LIMIT", "2000"))
+        self._mined_bills_limit = int(os.getenv("LUNALIB_MINER_BILL_CACHE_LIMIT", "500"))
+        self._mined_blocks_limit = int(os.getenv("LUNALIB_MINER_BLOCK_CACHE_LIMIT", "500"))
+        self.mined_block_callbacks: List[Callable] = []
+        self.mined_bill_callbacks: List[Callable] = []
+        self.loading_blocks_callbacks: List[Callable] = []
+        self.loading_bills_callbacks: List[Callable] = []
+        self._abort_event = threading.Event()
+        self._load_cached_records()
+
+    def _normalize_address(self, addr: str) -> str:
+        if not addr:
+            return ""
+        addr_str = str(addr).strip("'\" ").lower()
+        return addr_str[4:] if addr_str.startswith("lun_") else addr_str
+
+    def _resolve_miner_address(self, requested: Optional[str] = None) -> str:
+        configured = self.miner_address or ""
+        if configured:
+            if requested and self._normalize_address(requested) != self._normalize_address(configured):
+                safe_print("[WARN] Miner address override denied; using configured miner address.")
+            return configured
+        return requested or ""
+
+    def _cache_mined_reward(self, reward_tx: Dict) -> None:
+        if not reward_tx:
+            return
+        target = reward_tx.get("to") or ""
+        if self._normalize_address(target) != self._normalize_address(self.miner_address):
+            return
+        self.mined_rewards.append(reward_tx)
+        if self._mined_rewards_limit > 0 and len(self.mined_rewards) > self._mined_rewards_limit:
+            self.mined_rewards = self.mined_rewards[-self._mined_rewards_limit :]
+        try:
+            if hasattr(self.data_manager, "save_mined_rewards"):
+                self.data_manager.save_mined_rewards(self.mined_rewards)
+        except Exception:
+            pass
+
+    def _cache_mined_bill(self, bill_tx: Dict, persist: bool = True, emit: bool = True) -> None:
+        if not bill_tx:
+            return
+        self.mined_bills.append(bill_tx)
+        if self._mined_bills_limit > 0 and len(self.mined_bills) > self._mined_bills_limit:
+            self.mined_bills = self.mined_bills[-self._mined_bills_limit :]
+        if emit:
+            self._emit_mined_bill(bill_tx)
+        if persist:
+            try:
+                if hasattr(self.data_manager, "save_mined_bills"):
+                    self.data_manager.save_mined_bills(self.mined_bills)
+            except Exception:
+                pass
+
+    def _push_wallet_confirmed(self, txs: List[Dict]) -> None:
+        if not txs:
+            return
+        try:
+            from ..core.wallet_manager import get_wallet_manager
+            mgr = get_wallet_manager()
+            address = self.miner_address
+            if not address:
+                return
+            mgr.register_wallets([address])
+            mgr.sync_wallets_from_sources({address: txs}, {address: []})
+        except Exception:
+            pass
+
+    def _handle_mined_block_records(self, block_data: Dict) -> None:
+        if not isinstance(block_data, dict):
+            return
+        self._cache_mined_block(block_data)
+        txs = block_data.get("transactions", []) or []
+        reward_txs: List[Dict] = []
+        for tx in txs:
+            if not isinstance(tx, dict):
+                continue
+            if str(tx.get("type") or "").lower() != "reward":
+                continue
+            target = tx.get("to") or ""
+            if self._normalize_address(target) == self._normalize_address(self.miner_address):
+                reward_txs.append(tx)
+
+        if not reward_txs and block_data.get("reward") and self.miner_address:
+            reward_txs.append({
+                "type": "reward",
+                "from": "network",
+                "to": self.miner_address,
+                "amount": block_data.get("reward"),
+                "timestamp": block_data.get("timestamp"),
+                "block_height": block_data.get("index"),
+                "difficulty": block_data.get("difficulty"),
+                "hash": f"reward_{block_data.get('index')}_{str(block_data.get('hash', ''))[:8]}",
+                "description": f"Mining reward for block #{block_data.get('index')}",
+                "status": "confirmed",
+                "direction": "incoming",
+                "effective_amount": block_data.get("reward"),
+                "fee": 0,
+            })
+
+        for reward_tx in reward_txs:
+            self._cache_mined_reward(reward_tx)
+        if reward_txs:
+            self._push_wallet_confirmed(reward_txs)
+
+        for tx in txs:
+            if not isinstance(tx, dict):
+                continue
+            tx_type = str(tx.get("type") or "").lower()
+            if tx_type in {"gtx_genesis", "genesis_bill"}:
+                self._cache_mined_bill(tx)
+                self._register_bill_from_tx(tx, block_data)
+
+    def _cache_mined_block(self, block_data: Dict, persist: bool = True, emit: bool = True) -> None:
+        if not isinstance(block_data, dict):
+            return
+        key = self._history_key(block_data)
+        if key is None:
+            return
+        for entry in self.mined_blocks:
+            if self._history_key(entry) == key:
+                return
+        self.mined_blocks.append(block_data)
+        if self._mined_blocks_limit > 0 and len(self.mined_blocks) > self._mined_blocks_limit:
+            self.mined_blocks = self.mined_blocks[-self._mined_blocks_limit :]
+        if emit:
+            self._emit_mined_block(block_data)
+        if persist:
+            try:
+                if hasattr(self.data_manager, "record_mined_block"):
+                    self.data_manager.record_mined_block(block_data)
+            except Exception:
+                pass
+
+    def _emit_mined_block(self, block_data: Dict) -> None:
+        for cb in self.mined_block_callbacks:
+            try:
+                cb(block_data)
+            except Exception:
+                pass
+
+    def _emit_mined_bill(self, bill_tx: Dict) -> None:
+        for cb in self.mined_bill_callbacks:
+            try:
+                cb(bill_tx)
+            except Exception:
+                pass
+
+    def _emit_loading_blocks(self, current: int, total: int, item: Optional[Dict] = None) -> None:
+        for cb in self.loading_blocks_callbacks:
+            try:
+                cb(current, total, item)
+            except Exception:
+                pass
+
+    def _emit_loading_bills(self, current: int, total: int, item: Optional[Dict] = None) -> None:
+        for cb in self.loading_bills_callbacks:
+            try:
+                cb(current, total, item)
+            except Exception:
+                pass
+
+    def _load_cached_records(self) -> None:
+        try:
+            if hasattr(self.data_manager, "load_mined_blocks"):
+                blocks = self.data_manager.load_mined_blocks() or []
+                total = len(blocks)
+                for idx, block in enumerate(blocks, start=1):
+                    self._cache_mined_block(block, persist=False, emit=True)
+                    self._emit_loading_blocks(idx, total, block)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.data_manager, "load_mined_bills"):
+                bills = self.data_manager.load_mined_bills() or []
+                total = len(bills)
+                for idx, bill in enumerate(bills, start=1):
+                    self._cache_mined_bill(bill, persist=False, emit=True)
+                    self._emit_loading_bills(idx, total, bill)
+        except Exception:
+            pass
+
+    def _register_bill_from_tx(self, tx: Dict, block_data: Optional[Dict] = None) -> None:
+        try:
+            from ..gtx.bill_registry import BillRegistry
+        except Exception:
+            return
+        if not isinstance(tx, dict):
+            return
+        tx_type = str(tx.get("type") or "").lower()
+        if tx_type not in {"gtx_genesis", "genesis_bill"}:
+            return
+
+        bill_serial = tx.get("bill_serial") or tx.get("serial") or tx.get("bill_id")
+        if not bill_serial:
+            return
+        denomination = tx.get("denomination") or tx.get("amount") or 0
+        user_address = tx.get("user_address") or tx.get("to") or ""
+        difficulty = tx.get("mining_difficulty") or (block_data or {}).get("difficulty", 0)
+        mining_time = (block_data or {}).get("mining_time", 0.0)
+        tx_hash = tx.get("hash") or ""
+        timestamp = tx.get("timestamp") or (block_data or {}).get("timestamp") or time.time()
+        bill_data = tx.get("bill_data") or {}
+
+        bill_info = {
+            "bill_serial": bill_serial,
+            "denomination": float(denomination or 0),
+            "user_address": user_address,
+            "hash": tx_hash,
+            "mining_time": float(mining_time or 0.0),
+            "difficulty": int(difficulty or 0),
+            "luna_value": float(denomination or 0),
+            "timestamp": float(timestamp),
+            "bill_data": bill_data,
+        }
+
+        try:
+            BillRegistry().register_bill(bill_info)
+        except Exception:
+            pass
 
     def _resolve_reward_mode(self) -> str:
         """Resolve reward mode, preferring daemon configuration when available."""
@@ -797,6 +1161,44 @@ class Miner:
     def on_mining_status(self, callback: Callable) -> None:
         """Register a callback for mining status updates."""
         self.mining_status_callbacks.append(callback)
+
+    def on_cpu_hashrate(self, callback: Callable) -> None:
+        """Register a callback for CPU hashrate updates."""
+        self.cpu_hashrate_callbacks.append(callback)
+
+    def on_gpu_hashrate(self, callback: Callable) -> None:
+        """Register a callback for GPU hashrate updates."""
+        self.gpu_hashrate_callbacks.append(callback)
+
+    def _emit_cpu_hashrate(self, rate: float) -> None:
+        for cb in self.cpu_hashrate_callbacks:
+            try:
+                cb(rate)
+            except Exception:
+                pass
+
+    def _emit_gpu_hashrate(self, rate: float) -> None:
+        for cb in self.gpu_hashrate_callbacks:
+            try:
+                cb(rate)
+            except Exception:
+                pass
+
+    def on_mined_block(self, callback: Callable) -> None:
+        """Register a callback when a block is cached."""
+        self.mined_block_callbacks.append(callback)
+
+    def on_mined_bill(self, callback: Callable) -> None:
+        """Register a callback when a GTX bill is cached."""
+        self.mined_bill_callbacks.append(callback)
+
+    def on_loading_mined_blocks(self, callback: Callable) -> None:
+        """Register a callback for mined blocks loading progress."""
+        self.loading_blocks_callbacks.append(callback)
+
+    def on_loading_mined_bills(self, callback: Callable) -> None:
+        """Register a callback for mined bills loading progress."""
+        self.loading_bills_callbacks.append(callback)
 
     def _update_peak_hashrate(self, rate: float) -> None:
         try:
@@ -921,6 +1323,56 @@ class Miner:
             cpu_available = self.cpu_enabled
 
             safe_print(f"[DEBUG] (mine_block) gpu_enabled={self.gpu_enabled}, cpu_enabled={self.cpu_enabled}, cuda_manager={self.cuda_manager}, cuda_available={cuda_available}, cpu_available={cpu_available}")
+
+            if cuda_available and cpu_available and self.load_balance_mode == "parallel":
+                safe_print("[DEBUG] Mining engine selected: Hybrid (CPU+GPU)")
+                self.last_engine_used = "hybrid"
+
+                class _CombinedAbort:
+                    def __init__(self, a, b):
+                        self._a = a
+                        self._b = b
+
+                    def is_set(self):
+                        return (self._a.is_set() if self._a else False) or (self._b.is_set() if self._b else False)
+
+                local_abort = threading.Event()
+                combined_abort = _CombinedAbort(self._abort_event, local_abort)
+
+                block_cpu = copy.deepcopy(block_data)
+                block_gpu = copy.deepcopy(block_data)
+
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    fut_gpu = executor.submit(self._cuda_mine, block_gpu, block_difficulty, combined_abort)
+                    fut_cpu = executor.submit(self._cpu_mine, block_cpu, block_difficulty, combined_abort)
+
+                    winner = None
+                    while True:
+                        done, pending = concurrent.futures.wait(
+                            [fut_gpu, fut_cpu],
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        for f in done:
+                            try:
+                                res = f.result()
+                            except Exception:
+                                res = None
+                            if res:
+                                winner = res
+                        if winner:
+                            local_abort.set()
+                            break
+                        if fut_gpu.done() and fut_cpu.done():
+                            break
+
+                if winner:
+                    method = "cuda" if winner is block_gpu else "cpu"
+                    return self._finalize_block(winner, method, total_reward)
+
+                safe_print("[FATAL] Hybrid mining failed (CPU+GPU)")
+                self._emit_status("failure", "Hybrid mining failed")
+                return False, "Hybrid mining failed", None
 
             # If both are enabled, prefer GPU if available, else CPU
             if cuda_available:
@@ -1137,11 +1589,14 @@ class Miner:
                 'is_empty_block': False
             }
 
-    def _cuda_mine(self, block_data: Dict, difficulty: int) -> Optional[Dict]:
+    def _cuda_mine(self, block_data: Dict, difficulty: int, stop_event: Optional[threading.Event] = None) -> Optional[Dict]:
         """Mine using CUDA acceleration"""
         safe_print("[DEBUG] TOP OF _cuda_mine: function entered")
         if not self.gpu_enabled:
             safe_print("[DEBUG] _cuda_mine called but gpu_enabled is False (early return)")
+            return None
+        if (stop_event and stop_event.is_set()) or self._abort_event.is_set() or self.should_stop_mining:
+            safe_print("[DEBUG] _cuda_mine aborted before start")
             return None
         if not self.cuda_manager:
             safe_print("[DEBUG] _cuda_mine: self.cuda_manager is None (early return)")
@@ -1153,6 +1608,7 @@ class Miner:
             safe_print("[DEBUG] Entering _cuda_mine: Attempting CUDA mining...")
             if self.hashrate_callback:
                 self.hashrate_callback(0.0, 'gpu')
+            self._emit_gpu_hashrate(0.0)
             safe_print(f"[DEBUG] About to call cuda_manager.cuda_mine_batch with difficulty={difficulty}")
             status_interval = float(os.getenv("LUNALIB_MINER_STATUS_INTERVAL", "5"))
             batch_size = int(getattr(self.config, "cuda_batch_size", 1000000) or 1000000)
@@ -1177,17 +1633,18 @@ class Miner:
                     safe_print(f"[DEBUG] [GPU] Hashrate update: {rate:,.0f} H/s, attempts={self.last_gpu_attempts}, duration={self.last_gpu_duration}")
                     if self.hashrate_callback:
                         self.hashrate_callback(rate, 'gpu')
+                    self._emit_gpu_hashrate(rate)
 
             cuda_result = None
             try:
                 if self.multi_gpu_enabled:
                     safe_print("[DEBUG] Multi-GPU mining enabled. Using cuda_mine_multi_gpu_batch.")
                     cuda_result = self.cuda_manager.cuda_mine_multi_gpu_batch(
-                        block_data, difficulty, batch_size=batch_size, progress_callback=_progress
+                        block_data, difficulty, batch_size=batch_size, progress_callback=_progress, stop_event=(stop_event or self._abort_event)
                     )
                 else:
                     cuda_result = self.cuda_manager.cuda_mine_batch(
-                        block_data, difficulty, batch_size=batch_size, progress_callback=_progress
+                        block_data, difficulty, batch_size=batch_size, progress_callback=_progress, stop_event=(stop_event or self._abort_event)
                     )
                 safe_print(f"[DEBUG] cuda_manager mining returned: {cuda_result}")
             except Exception as ce:
@@ -1208,6 +1665,7 @@ class Miner:
                     safe_print(f"[DEBUG] [GPU] Final hashrate: {self.hash_rate:,.0f} H/s, nonce={nonce}, mining_time={mining_time}")
                     if self.hashrate_callback:
                         self.hashrate_callback(self.hash_rate, 'gpu')
+                self._emit_gpu_hashrate(self.hash_rate)
                 self.current_nonce = nonce
                 self.current_hash = cuda_result.get('hash', '')
                 block_data['hash'] = cuda_result['hash']
@@ -1217,27 +1675,113 @@ class Miner:
             safe_print(f"[DEBUG] Exception in _cuda_mine: {e}")
         return None
 
-    def _cpu_mine(self, block_data: Dict, difficulty: int) -> Optional[Dict]:
+    def _cpu_mine(self, block_data: Dict, difficulty: int, stop_event: Optional[threading.Event] = None) -> Optional[Dict]:
         """Mine using CPU"""
         import concurrent.futures
         if not self.cpu_enabled:
             safe_print("[DEBUG] _cpu_mine called but cpu_enabled is False")
             return None
+        if (stop_event and stop_event.is_set()) or self._abort_event.is_set() or self.should_stop_mining:
+            safe_print("[DEBUG] _cpu_mine aborted before start")
+            return None
         safe_print("[DEBUG] Entering _cpu_mine: Using CPU mining (multi-threaded)...")
         if self.hashrate_callback:
             self.hashrate_callback(0.0, 'cpu')
+        self._emit_cpu_hashrate(0.0)
         start_time = time.time()
         target = "0" * difficulty
         num_workers = self.get_cpu_workers()
-        max_nonce = 1000000
+        max_nonce = getattr(self, "cpu_max_nonce", 1_000_000)
         found = threading.Event()
         result = [None]
 
+        pinning_enabled = bool(int(os.getenv("LUNALIB_CPU_PINNING", "0")))
+        pin_list = _parse_cpu_list(os.getenv("LUNALIB_CPU_PIN_LIST"))
+        if bool(int(os.getenv("LUNALIB_NUMA", "0"))):
+            try:
+                node_id = int(os.getenv("LUNALIB_NUMA_NODE", "0"))
+            except Exception:
+                node_id = 0
+            pin_list = _get_numa_cpulist(node_id) or pin_list
+        if not pin_list:
+            pin_list = list(range(os.cpu_count() or 1))
+
+        hash_mode = (os.getenv("LUNALIB_MINING_HASH_MODE") or getattr(self, "mining_hash_mode", "json")).lower()
+        base80 = None
+        if hash_mode == "compact":
+            base80 = self._build_compact_base80(
+                block_data['index'],
+                block_data['previous_hash'],
+                block_data['timestamp'],
+                block_data['miner'],
+                difficulty,
+            )
+
+        use_c_mine = base80 is not None and callable(sm3_mine_compact)
+        config_c_threads = getattr(self.config, "cpu_c_threads", None)
+        env_c_threads = os.getenv("LUNALIB_CPU_C_THREADS")
+        try:
+            if config_c_threads is not None:
+                c_threads = int(config_c_threads)
+            elif env_c_threads is not None:
+                c_threads = int(env_c_threads)
+            else:
+                c_threads = 1
+        except Exception:
+            c_threads = 1
+        if c_threads < 1:
+            c_threads = 1
+
         def worker(start_nonce, step):
+            if pinning_enabled and pin_list:
+                core = pin_list[start_nonce % len(pin_list)]
+                _pin_current_thread(core)
+            if use_c_mine:
+                chunk = getattr(self, "cpu_c_chunk", 200_000)
+                if chunk < 1:
+                    chunk = 200_000
+                nonce = start_nonce * chunk
+                while not found.is_set() and nonce < max_nonce and not self._abort_event.is_set() and not self.should_stop_mining and not (stop_event and stop_event.is_set()):
+                    count = min(chunk, max_nonce - nonce)
+                    t0 = time.time()
+                    if c_threads > 1:
+                        found_nonce = sm3_mine_compact(base80, nonce, count, difficulty, c_threads)
+                    else:
+                        found_nonce = sm3_mine_compact(base80, nonce, count, difficulty)
+                    elapsed = time.time() - t0
+                    if elapsed > 0:
+                        rate = count / elapsed
+                        safe_print(f"[DEBUG] [CPU] Worker {start_nonce}: {rate:,.0f} H/s at nonce {nonce}")
+                        if self.hashrate_callback:
+                            try:
+                                self.hashrate_callback(rate, 'cpu')
+                            except Exception:
+                                pass
+                        self._emit_cpu_hashrate(rate)
+                    if found_nonce is not None:
+                        block_hash = self._calculate_block_hash(
+                            block_data['index'],
+                            block_data['previous_hash'],
+                            block_data['timestamp'],
+                            block_data['transactions'],
+                            found_nonce,
+                            block_data['miner'],
+                            difficulty
+                        )
+                        elapsed_total = time.time() - start_time
+                        safe_print(f"[DEBUG] [CPU] Block found: nonce={found_nonce}, hash={block_hash}, elapsed={elapsed_total:.2f}s")
+                        block_data['hash'] = block_hash
+                        block_data['nonce'] = int(found_nonce)
+                        result[0] = block_data.copy()
+                        found.set()
+                        return
+                    nonce += chunk * step
+                return
+
             nonce = start_nonce
             hash_count = 0
             last_hash_update = time.time()
-            while not found.is_set() and nonce < max_nonce:
+            while not found.is_set() and nonce < max_nonce and not self._abort_event.is_set() and not self.should_stop_mining and not (stop_event and stop_event.is_set()):
                 block_hash = self._calculate_block_hash(
                     block_data['index'],
                     block_data['previous_hash'],
@@ -1264,6 +1808,11 @@ class Miner:
                     last_hash_update = current_time
                     hash_count = 0
                     safe_print(f"[DEBUG] [CPU] Worker {start_nonce}: {rate:,.0f} H/s at nonce {nonce}")
+                    if self.hashrate_callback:
+                        try:
+                            self.hashrate_callback(rate, 'cpu')
+                        except Exception:
+                            pass
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(worker, i, num_workers) for i in range(num_workers)]
@@ -1278,6 +1827,7 @@ class Miner:
             safe_print(f"[DEBUG] [CPU] Final hashrate: {self.last_cpu_hashrate:,.0f} H/s, nonce={result[0]['nonce']}, elapsed={elapsed:.2f}s")
             if self.hashrate_callback:
                 self.hashrate_callback(self.last_cpu_hashrate, 'cpu')
+            self._emit_cpu_hashrate(self.last_cpu_hashrate)
             return result[0]
         return None
     def profile_hash_function(self, n=10000):
@@ -1313,7 +1863,8 @@ class Miner:
                              transactions: List[Dict], nonce: int, miner: str, difficulty: int) -> str:
         """Calculate SHA-256 hash of a block matching server validation"""
         try:
-            hash_mode = os.getenv("LUNALIB_MINING_HASH_MODE", "json").lower()
+            env_hash_mode = os.getenv("LUNALIB_MINING_HASH_MODE")
+            hash_mode = (env_hash_mode or getattr(self, "mining_hash_mode", "json")).lower()
             if hash_mode == "compact":
                 return self._calculate_block_hash_compact(index, previous_hash, timestamp, nonce, miner, difficulty)
             block_data = {
@@ -1339,23 +1890,35 @@ class Miner:
                                       nonce: int, miner: str, difficulty: int) -> str:
         """Compact mining hash: fixed 88-byte header (80-byte base + 8-byte nonce)."""
         try:
-            if len(previous_hash) != 64:
+            base = self._build_compact_base80(index, previous_hash, timestamp, miner, difficulty)
+            if not base:
                 return "0" * 64
-            prev_bytes = bytes.fromhex(previous_hash)
-            miner_hash = sm3_digest(str(miner).encode())
-            base = (
-                prev_bytes
-                + int(index).to_bytes(4, "big", signed=False)
-                + int(difficulty).to_bytes(4, "big", signed=False)
-                + struct.pack(">d", float(timestamp))
-                + miner_hash
-            )
-            if len(base) != 80:
-                return "0" * 64
+            try:
+                return sm3_compact_hash(base, int(nonce)).hex()
+            except Exception:
+                pass
             nonce_bytes = int(nonce).to_bytes(8, "big", signed=False)
             return sm3_digest(base + nonce_bytes).hex()
         except Exception:
             return "0" * 64
+
+    def _build_compact_base80(self, index: int, previous_hash: str, timestamp: float,
+                              miner: str, difficulty: int) -> Optional[bytes]:
+        if len(previous_hash) != 64:
+            return None
+        try:
+            prev_bytes = bytes.fromhex(previous_hash)
+        except Exception:
+            return None
+        miner_hash = sm3_digest(str(miner).encode())
+        base = (
+            prev_bytes
+            + int(index).to_bytes(4, "big", signed=False)
+            + int(difficulty).to_bytes(4, "big", signed=False)
+            + struct.pack(">d", float(timestamp))
+            + miner_hash
+        )
+        return base if len(base) == 80 else None
 
     def _finalize_block(self, block_data: Dict, method: str, total_reward: float) -> tuple[bool, str, Dict]:
         """Finalize mined block with proper record keeping and blockchain submission"""
@@ -1446,6 +2009,9 @@ class Miner:
                 self.data_manager.update_mining_stats(self.get_mining_stats())
         except Exception as e:
             safe_print(f"[WARN] Failed to update mining records: {e}")
+
+        # Cache rewards/bills and push rewards into wallet state
+        self._handle_mined_block_records(block_data)
 
         return True, f"Block #{block_data['index']} mined - Reward: {final_reward}", block_data
     
@@ -1616,6 +2182,13 @@ class Miner:
 
         self.is_mining = True
         self.should_stop_mining = False
+        self._abort_event.clear()
+        sm3_set_abort(False)
+        if self.cuda_manager and hasattr(self.cuda_manager, "reset_abort"):
+            try:
+                self.cuda_manager.reset_abort()
+            except Exception:
+                pass
 
         if self.mining_started_callback:
             self.mining_started_callback()
@@ -1629,7 +2202,7 @@ class Miner:
         status_interval = float(os.getenv("LUNALIB_MINER_STATUS_INTERVAL", "5"))
         last_status = time.time()
 
-        while self.is_mining and not self.should_stop_mining:
+        while self.is_mining and not self.should_stop_mining and not self._abort_event.is_set():
             success, message, block = self.mine_block()
 
             if success:
@@ -1658,8 +2231,28 @@ class Miner:
         """Stop the mining process"""
         self.is_mining = False
         self.should_stop_mining = True
+        self._abort_event.set()
+        sm3_set_abort(True)
+        if self.cuda_manager and hasattr(self.cuda_manager, "abort"):
+            try:
+                self.cuda_manager.abort()
+            except Exception:
+                pass
         if self.mining_thread and self.mining_thread.is_alive():
             self.mining_thread.join()
+
+    def abort_mining_now(self) -> None:
+        """Abort mining immediately (best-effort for CPU/CUDA)."""
+        self.is_mining = False
+        self.should_stop_mining = True
+        self.mining_active = False
+        self._abort_event.set()
+        sm3_set_abort(True)
+        if self.cuda_manager and hasattr(self.cuda_manager, "abort"):
+            try:
+                self.cuda_manager.abort()
+            except Exception:
+                pass
 
     def get_mining_stats(self):
         """Return the current mining statistics"""
@@ -1672,6 +2265,9 @@ class Miner:
             "peak_hashrate": self.peak_hashrate,
             "mempool_size": self._get_mempool_size(),
             "mining_history": len(self.mining_history),
+            "miner_address": self.miner_address,
+            "mined_rewards": len(self.mined_rewards),
+            "mined_bills": len(self.mined_bills),
             "last_engine_used": self.last_engine_used,
             "last_cpu_hashrate": self.last_cpu_hashrate,
             "last_cpu_attempts": self.last_cpu_attempts,

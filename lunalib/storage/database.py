@@ -18,24 +18,40 @@ def safe_print(*args, **kwargs):
         print(*(str(a).encode(encoding, errors='replace').decode(encoding) for a in args), **kwargs)
 
 
+def _safe_home_dir() -> str:
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        return home
+    env_home = os.getenv("HOME") or os.getenv("USERPROFILE")
+    if env_home:
+        return env_home
+    return os.getcwd()
+
+
 def get_default_wallet_dir() -> str:
     """Resolve a writable default wallet directory across platforms."""
     if sys.platform == "emscripten":
         return "."
 
+    override = os.getenv("LUNALIB_DATA_DIR") or os.getenv("LUNALIB_WALLET_DIR")
+    if override:
+        return override
+
+    home = _safe_home_dir()
+
     if os.name == "nt":
-        base = os.getenv("APPDATA") or os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+        base = os.getenv("APPDATA") or os.getenv("LOCALAPPDATA") or home
         return os.path.join(base, "LunaLib")
 
     if sys.platform == "darwin":
-        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "LunaLib")
+        return os.path.join(home, "Library", "Application Support", "LunaLib")
 
     # Mobile (best-effort) + Linux/Unix
     android_base = os.getenv("ANDROID_APP_STORAGE") or os.getenv("ANDROID_DATA")
     if android_base:
         return os.path.join(android_base, "LunaLib")
 
-    xdg_base = os.getenv("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    xdg_base = os.getenv("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
     return os.path.join(xdg_base, "LunaLib")
 
 

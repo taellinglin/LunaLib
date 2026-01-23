@@ -2,12 +2,22 @@ import os
 import json
 import sqlite3
 from typing import Dict, List, Optional
+from lunalib.storage.database import get_default_wallet_dir
+
+
+def _resolve_bill_db_path(db_path: Optional[str] = None) -> str:
+    if db_path:
+        return db_path
+    legacy = os.path.join(os.path.expanduser("~"), ".luna_wallet", "bills.db")
+    if os.path.exists(legacy):
+        return legacy
+    return os.path.join(get_default_wallet_dir(), "bills.db")
 
 class BillRegistry:
     """Manages bill database with verification links and metadata"""
     
     def __init__(self, db_path=None):
-        self.db_path = db_path or os.path.join(os.path.expanduser("~"), ".luna_wallet", "bills.db")
+        self.db_path = _resolve_bill_db_path(db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_database()
     
