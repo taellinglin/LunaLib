@@ -1,6 +1,7 @@
 # lunalib/core/mempool.py - Updated version
 
 import time
+from lunalib.utils.validation import is_valid_address, sanitize_memo, validate_gtx_genesis_payload
 import requests
 import threading
 import sys
@@ -115,6 +116,44 @@ class MempoolManager:
                 if not hashes:
                     self._addr_index.pop(addr, None)
 
+    def _extract_amount(self, transaction: Dict):
+        for key in ("amount", "transfer_amount", "value", "denomination", "quantity"):
+            if key in transaction:
+                return transaction.get(key)
+        return None
+
+    def _is_zero_amount_transfer(self, transaction: Dict) -> bool:
+        tx_type = (transaction.get("type") or "").lower()
+        if tx_type not in ("transfer", "transaction"):
+            return False
+        amount = self._extract_amount(transaction)
+        if amount is None:
+            return False
+        try:
+            return float(amount) <= 0
+        except (TypeError, ValueError):
+            return False
+
+    def _purge_zero_amount_transfers(self) -> int:
+        to_remove = []
+        for tx_hash, tx_data in list(self.local_mempool.items()):
+            tx = tx_data.get("transaction", {}) if isinstance(tx_data, dict) else {}
+            if self._is_zero_amount_transfer(tx):
+                to_remove.append(tx_hash)
+
+        if not to_remove:
+            return 0
+
+        for tx_hash in to_remove:
+            self.local_mempool.pop(tx_hash, None)
+            self._deindex_tx(tx_hash)
+
+        self._mempool_order = deque([h for h in self._mempool_order if h not in set(to_remove)])
+
+        if self.verbose:
+            print(f"DEBUG: Purged {len(to_remove)} zero-amount transfers from mempool")
+        return len(to_remove)
+
     
     def add_transaction(self, transaction: Dict) -> bool:
         """Add transaction to local mempool and broadcast to network"""
@@ -207,6 +246,8 @@ class MempoolManager:
             if not tx_hash:
                 continue
             if tx_hash in self.local_mempool or tx_hash in self.confirmed_transactions:
+                continue
+            if self._is_zero_amount_transfer(tx):
                 continue
             self.local_mempool[tx_hash] = {
                 "transaction": tx,
@@ -487,6 +528,7 @@ class MempoolManager:
         """Get all pending transactions, optionally filtered by address; can fetch remote first."""
         if fetch_remote:
             self._maybe_fetch_remote_mempool()
+        self._prune_mempool()
 
         target_norm = self._normalize_address(address) if address else None
         transactions = []
@@ -513,6 +555,7 @@ class MempoolManager:
 
         if fetch_remote:
             self._maybe_fetch_remote_mempool()
+        self._prune_mempool()
 
         norm_to_original: Dict[str, str] = {}
         for addr in addresses:
@@ -601,6 +644,9 @@ class MempoolManager:
             elif 'source' in transaction:
                 transaction['from'] = transaction.get('source')
 
+        if 'memo' in transaction:
+            transaction['memo'] = sanitize_memo(transaction.get('memo'))
+
         tx_type = (transaction.get("type") or "").lower()
         if tx_type in ("reward", "gtx_genesis", "genesis_bill"):
             required_fields = ['type', 'to', 'amount', 'timestamp', 'hash']
@@ -647,7 +693,7 @@ class MempoolManager:
             if not from_addr or not to_addr:
                 print("DEBUG: Missing from or to address")
                 return False
-            if not from_addr.startswith("LUN_") or not to_addr.startswith("LUN_"):
+            if not is_valid_address(from_addr) or not is_valid_address(to_addr):
                 print("DEBUG: Invalid address format")
                 return False
             signature = transaction.get("signature", "")
@@ -657,6 +703,36 @@ class MempoolManager:
                 return False
             if len(signature) != 128:
                 print("DEBUG: Invalid signature length")
+                return False
+        elif tx_type == "reward":
+            sender = str(transaction.get("from") or "").lower().strip()
+            allowed = {
+                "network",
+                "block_reward",
+                "mining_reward",
+                "coinbase",
+                "ling country",
+                "ling country mines",
+                "foreign exchange",
+            }
+            if sender not in allowed:
+                print("DEBUG: Invalid reward source")
+                return False
+            if not is_valid_address(to_addr):
+                print("DEBUG: Invalid reward address")
+                return False
+            sig = str(transaction.get("signature") or "").lower().strip()
+            pub = str(transaction.get("public_key") or "").lower().strip()
+            if sig not in allowed or pub not in allowed:
+                print("DEBUG: Invalid reward signature")
+                return False
+        elif tx_type in ("gtx_genesis", "genesis_bill"):
+            ok, message = validate_gtx_genesis_payload(transaction)
+            if not ok:
+                print(f"DEBUG: GTX validation failed: {message}")
+                return False
+            if not is_valid_address(to_addr):
+                print("DEBUG: Invalid genesis address")
                 return False
         else:
             if not to_addr:
@@ -719,6 +795,9 @@ class MempoolManager:
     def _prune_mempool(self):
         """Prune expired or excess mempool entries."""
         now = time.time()
+
+        # Purge zero-amount transfers
+        self._purge_zero_amount_transfers()
 
         # Prune by TTL
         if self.mempool_ttl > 0:

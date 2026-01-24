@@ -16,7 +16,7 @@ import struct
 from lunalib.core.sm3 import sm3_hex, sm3_digest, sm3_compact_hash, sm3_mine_compact, sm3_set_abort
 import json
 import threading
-from typing import Dict, Optional, List, Union, Callable
+from typing import Dict, Optional, List, Union, Callable, Tuple, Any
 from ..mining.difficulty import DifficultySystem
 from ..gtx.digital_bill import DigitalBill
 from ..transactions.transactions import TransactionManager
@@ -99,6 +99,66 @@ def _get_numa_cpulist(node: int) -> List[int]:
     if os.name == "posix":
         return _get_linux_numa_cpulist(node)
     return []
+
+
+def validate_mining_proof_internal(block: Dict) -> Dict[str, Any]:
+    """Validate mining proof for a block using Lunalib canonical hashing."""
+    if not isinstance(block, dict):
+        return {"valid": False, "message": "Block must be a dict"}
+
+    block_hash = str(block.get("hash", ""))
+    try:
+        difficulty = int(block.get("difficulty", 0))
+    except Exception:
+        return False, "Invalid difficulty"
+
+    if not block_hash or difficulty < 0:
+        return {"valid": False, "message": "Missing hash or difficulty"}
+
+    target = "0" * difficulty
+    if difficulty > 0 and not block_hash.startswith(target):
+        return {"valid": False, "message": "Hash does not meet difficulty"}
+
+    try:
+        pow_payload = {
+            "difficulty": int(difficulty),
+            "index": int(block.get("index", 0)),
+            "miner": str(block.get("miner", "")),
+            "nonce": int(block.get("nonce", 0)),
+            "previous_hash": str(block.get("previous_hash", "")),
+            "timestamp": float(block.get("timestamp", 0.0)),
+            "transactions": [],
+            "version": "1.0",
+        }
+        pow_string = json.dumps(pow_payload, sort_keys=True)
+        pow_hash = sm3_hex(pow_string.encode())
+        if pow_hash == block_hash:
+            return {"valid": True, "message": "OK"}
+    except Exception as e:
+        return {"valid": False, "message": f"SM3 hash validation error: {e}"}
+
+    try:
+        if os.getenv("LUNALIB_MINING_HASH_MODE", "json").lower() == "compact":
+            previous_hash = str(block.get("previous_hash", ""))
+            if len(previous_hash) == 64:
+                prev_bytes = bytes.fromhex(previous_hash)
+                miner_hash = sm3_digest(str(block.get("miner", "")).encode())
+                base = (
+                    prev_bytes
+                    + int(block.get("index", 0)).to_bytes(4, "big", signed=False)
+                    + int(difficulty).to_bytes(4, "big", signed=False)
+                    + struct.pack(">d", float(block.get("timestamp", 0.0)))
+                    + miner_hash
+                )
+                if len(base) == 80:
+                    nonce = int(block.get("nonce", 0))
+                    compact_hash = sm3_compact_hash(base, nonce).hex()
+                    if compact_hash == block_hash:
+                        return {"valid": True, "message": "OK"}
+    except Exception as e:
+        return {"valid": False, "message": f"Compact hash validation error: {e}"}
+
+    return {"valid": False, "message": "SM3 hash mismatch"}
 
 class GenesisMiner:
     """Mines GTX Genesis bills AND regular transfer transactions with configurable difficulty"""
@@ -238,6 +298,39 @@ class GenesisMiner:
                     transactions=transactions,
                     block_data=block_data  # Pass block data for validation
                 )
+
+                try:
+                    non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
+                    fees_total = sum(
+                        float(tx.get("fee", 0) or 0)
+                        for tx in non_reward_txs
+                        if str(tx.get("type") or "").lower() == "transaction"
+                    )
+                    gtx_denom_total = 0.0
+                    for tx in non_reward_txs:
+                        if str(tx.get("type") or "").lower() in {"gtx_genesis", "genesis_bill"}:
+                            denom = float(tx.get("amount", tx.get("denomination", 0)) or 0)
+                            gtx_denom_total += self.difficulty_system.gtx_reward_units(denom)
+                    tx_count = len(non_reward_txs)
+                    expected_reward = self._calculate_expected_block_reward(
+                        difficulty,
+                        block_height,
+                        tx_count,
+                        fees_total,
+                        gtx_denom_total,
+                        False,
+                    )
+                    reward_tx["amount"] = expected_reward
+                    reward_tx["block_height"] = block_height
+                    reward_tx["difficulty"] = difficulty
+                    reward_tx["timestamp"] = block_data.get("timestamp")
+                    reward_tx["signature"] = reward_tx.get("signature") or "ling country"
+                    reward_tx["public_key"] = reward_tx.get("public_key") or "ling country"
+                    reward_tx["version"] = reward_tx.get("version") or "2.0"
+                    tx_copy = {k: v for k, v in reward_tx.items() if k != "hash"}
+                    reward_tx["hash"] = sm3_hex(json.dumps(tx_copy, sort_keys=True).encode())
+                except Exception:
+                    pass
                 
                 # Add reward transaction
                 block_data["transactions"].append(reward_tx)
@@ -375,20 +468,31 @@ class GenesisMiner:
     
     def _create_mining_reward_transaction(self, miner_address: str, block_height: int, 
                                         transactions: List[Dict], block_data: Dict = None) -> Dict:
-        """Create mining reward transaction with validation of the mining proof"""
-        # Calculate reward
+        """Create mining reward transaction with daemon-compatible formatting."""
         difficulty = block_data.get('difficulty', 0) if block_data else 0
         non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
         is_empty_block = not non_reward_txs
+        fees_total = sum(
+            float(tx.get("fee", 0) or 0)
+            for tx in non_reward_txs
+            if str(tx.get("type") or "").lower() == "transaction"
+        )
+        gtx_denom_total = sum(
+            float(tx.get("amount", tx.get("denomination", 0)) or 0)
+            for tx in non_reward_txs
+            if str(tx.get("type") or "").lower() in {"gtx_genesis", "genesis_bill"}
+        )
+        tx_count = len(non_reward_txs)
+        block_ts = float(block_data.get('timestamp', time.time())) if block_data else time.time()
 
-        reward_mode = self._resolve_reward_mode()
-        if is_empty_block:
-            total_reward = float(difficulty)
-        else:
-            if reward_mode == "linear":
-                total_reward = float(difficulty)
-            else:
-                total_reward = self.difficulty_system.calculate_block_reward(difficulty)
+        total_reward = self._calculate_expected_block_reward(
+            difficulty,
+            block_height,
+            tx_count,
+            fees_total,
+            gtx_denom_total,
+            is_empty_block,
+        )
         
         # If block_data is provided, validate the mining proof
         if block_data:
@@ -498,13 +602,9 @@ class GenesisMiner:
             
             print("✅ Mining proof validation successful!")
         
-        # Create the reward transaction
-        return self.transaction_manager.create_reward_transaction(
-            to_address=miner_address,
-            amount=total_reward,
-            block_height=block_height,
-            reward_type="block"
-        )
+        if is_empty_block:
+            return self._create_empty_block_reward(block_height, difficulty, total_reward, timestamp=block_ts)
+        return self._create_block_reward(block_height, difficulty, total_reward, timestamp=block_ts)
 
     def _resolve_reward_mode(self) -> str:
         """Resolve reward mode, preferring daemon configuration when available."""
@@ -1280,22 +1380,36 @@ class Miner:
             
             # Calculate block difficulty based on transactions
             block_difficulty = self._calculate_block_difficulty(valid_transactions)
+
+            non_reward_txs = [tx for tx in valid_transactions if tx.get('type') != 'reward']
+            fees_total = sum(
+                float(tx.get("fee", 0) or 0)
+                for tx in non_reward_txs
+                if str(tx.get("type") or "").lower() == "transaction"
+            )
+            gtx_denom_total = 0.0
+            for tx in non_reward_txs:
+                if str(tx.get("type") or "").lower() in {"gtx_genesis", "genesis_bill"}:
+                    denom = float(tx.get("amount", tx.get("denomination", 0)) or 0)
+                    gtx_denom_total += self.difficulty_system.gtx_reward_units(denom)
+            tx_count = len(non_reward_txs)
             
             # Calculate block reward:
             # - Empty blocks use LINEAR system: difficulty 1 = 1 LKC, difficulty 2 = 2 LKC, etc.
             # - Blocks with transactions use EXPONENTIAL system: 10^(difficulty-1)
-            if not valid_transactions:
-                # Empty block: linear reward
-                total_reward = float(block_difficulty)
+            is_empty_block = not valid_transactions
+            total_reward = self._calculate_expected_block_reward(
+                block_difficulty,
+                new_index,
+                tx_count,
+                fees_total,
+                gtx_denom_total,
+                is_empty_block,
+            )
+            if is_empty_block:
                 reward_tx = self._create_empty_block_reward(new_index, block_difficulty, total_reward)
                 valid_transactions = [reward_tx]
             else:
-                # Regular block: reward mode can be linear (difficulty) or exponential
-                reward_mode = self._resolve_reward_mode()
-                if reward_mode == "linear":
-                    total_reward = float(block_difficulty)
-                else:
-                    total_reward = self._calculate_exponential_block_reward(block_difficulty)
                 reward_tx = self._create_block_reward(new_index, block_difficulty, total_reward)
                 valid_transactions = valid_transactions + [reward_tx]
 
@@ -1367,7 +1481,8 @@ class Miner:
                             break
 
                 if winner:
-                    method = "cuda" if winner is block_gpu else "cpu"
+                    engine = "cuda" if winner is block_gpu else "cpu"
+                    method = self._format_mining_method(engine)
                     return self._finalize_block(winner, method, total_reward)
 
                 safe_print("[FATAL] Hybrid mining failed (CPU+GPU)")
@@ -1384,7 +1499,7 @@ class Miner:
                     safe_print(f"[FATAL] Exception calling _cuda_mine: {e}")
                     cuda_result = None
                 if cuda_result:
-                    return self._finalize_block(cuda_result, 'cuda', total_reward)
+                    return self._finalize_block(cuda_result, self._format_mining_method('cuda'), total_reward)
                 else:
                     safe_print("[DEBUG] GPU mining failed or not successful, falling back to CPU if available...")
                     # Fallback to CPU if allowed
@@ -1396,7 +1511,7 @@ class Miner:
                             safe_print(f"[FATAL] Exception calling _cpu_mine: {e}")
                             cpu_result = None
                         if cpu_result:
-                            return self._finalize_block(cpu_result, 'cpu', total_reward)
+                            return self._finalize_block(cpu_result, self._format_mining_method('cpu'), total_reward)
                         else:
                             safe_print("[FATAL] CPU mining also failed after GPU fallback!")
                     else:
@@ -1410,7 +1525,7 @@ class Miner:
                     safe_print(f"[FATAL] Exception calling _cpu_mine: {e}")
                     cpu_result = None
                 if cpu_result:
-                    return self._finalize_block(cpu_result, 'cpu', total_reward)
+                    return self._finalize_block(cpu_result, self._format_mining_method('cpu'), total_reward)
                 else:
                     safe_print("[FATAL] CPU mining failed!")
             else:
@@ -1532,8 +1647,38 @@ class Miner:
             total_reward = 1.0
 
         return total_reward
+
+    def _format_mining_method(self, engine: str) -> str:
+        engine_lower = str(engine or "").lower()
+        if engine_lower in {"cuda", "gpu"}:
+            total = 0
+            if self.cuda_manager and getattr(self.cuda_manager, "cuda_available", False):
+                total = int(getattr(self.cuda_manager, "device_count", 0) or 0)
+            used = total if getattr(self, "multi_gpu_enabled", False) and total > 0 else (1 if total != 0 else 1)
+            if total <= 0:
+                total = used
+            return f"GPU[{used}/{total}]"
+        if engine_lower == "cpu":
+            try:
+                total = int(os.cpu_count() or 1)
+            except Exception:
+                total = 1
+            used = int(self.get_cpu_workers()) if hasattr(self, "get_cpu_workers") else total
+            if used <= 0:
+                used = total
+            if total <= 0:
+                total = used
+            return f"CPU[{used}/{total}]"
+        return str(engine)
     
-    def _calculate_exponential_block_reward(self, difficulty: int) -> float:
+    def _calculate_exponential_block_reward(
+        self,
+        difficulty: int,
+        block_height: int | None = None,
+        tx_count: int = 0,
+        fees_total: float = 0.0,
+        gtx_denom_total: float = 0.0,
+    ) -> float:
         """Calculate block reward using exponential difficulty system
         
         Uses the new exponential reward system:
@@ -1542,52 +1687,123 @@ class Miner:
         difficulty 3 = 100 LKC
         difficulty 9 = 100,000,000 LKC
         """
-        return self.difficulty_system.calculate_block_reward(difficulty)
+        return self.difficulty_system.calculate_block_reward(
+            difficulty,
+            block_height=block_height,
+            tx_count=tx_count,
+            fees_total=fees_total,
+            gtx_denom_total=gtx_denom_total,
+        )
 
-    def _create_empty_block_reward(self, block_index: int, difficulty: int, reward_amount: float) -> Dict:
+    def _calculate_expected_block_reward(
+        self,
+        difficulty: int,
+        block_height: int | None,
+        tx_count: int,
+        fees_total: float,
+        gtx_denom_total: float,
+        is_empty_block: bool,
+    ) -> float:
+        base_reward = None
+        reward_mode = self._resolve_reward_mode()
+        if is_empty_block or reward_mode == "linear":
+            base_reward = float(difficulty or 0)
+        
+        reward = self.difficulty_system.calculate_block_reward(
+            difficulty,
+            block_height=block_height,
+            tx_count=0 if is_empty_block else tx_count,
+            fees_total=0.0 if is_empty_block else fees_total,
+            gtx_denom_total=0.0 if is_empty_block else gtx_denom_total,
+            base_reward=base_reward,
+        )
+        if is_empty_block:
+            try:
+                empty_mult = float(os.getenv("LUNALIB_EMPTY_BLOCK_MULT", "0.0001"))
+            except Exception:
+                empty_mult = 0.0001
+            reward = max(0.0, reward * empty_mult)
+        return reward
+
+    def _create_empty_block_reward(self, block_index: int, difficulty: int, reward_amount: float, timestamp: Optional[float] = None) -> Dict:
         """Create reward transaction for empty blocks using LINEAR reward system (difficulty = reward)"""
-        return {
+        try:
+            empty_mult = float(os.getenv("LUNALIB_EMPTY_BLOCK_MULT", "0.0001"))
+        except Exception:
+            empty_mult = 0.0001
+        if timestamp is None:
+            timestamp = time.time()
+        tx = {
             'type': 'reward',
-            'from': 'network',
+            'from': 'ling country',
             'to': self.config.miner_address,
             'amount': reward_amount,
-            'timestamp': time.time(),
+            'fee': 0.0,
+            'timestamp': timestamp,
             'block_height': block_index,
             'difficulty': difficulty,
-            'hash': f"reward_{block_index}_{int(time.time())}",
-            'description': f'Empty block mining reward (Linear: Difficulty {difficulty} = {reward_amount} LKC)',
+            'signature': 'Ling Country',
+            'public_key': 'Ling Country',
+            'version': '2.0',
+            'hash': '',
+            'description': f'Empty block mining reward (Difficulty {difficulty} x {empty_mult} = {reward_amount} LKC)',
             'is_empty_block': True
         }
+        tx['hash'] = sm3_hex(json.dumps({k: v for k, v in tx.items() if k != 'hash'}, sort_keys=True).encode())
+        return tx
 
-    def _create_block_reward(self, block_index: int, difficulty: int, reward_amount: float) -> Dict:
+    def _create_block_reward(self, block_index: int, difficulty: int, reward_amount: float, timestamp: Optional[float] = None) -> Dict:
         """Create reward transaction for non-empty blocks using EXPONENTIAL reward system."""
+        if reward_amount is None or reward_amount <= 0:
+            reward_amount = self._calculate_expected_block_reward(
+                difficulty,
+                block_index,
+                0,
+                0.0,
+                0.0,
+                False,
+            )
+        if timestamp is None:
+            timestamp = time.time()
         reward_mode = self._resolve_reward_mode()
         if reward_mode == "linear":
-            return {
+            tx = {
                 'type': 'reward',
-                'from': 'network',
+                'from': 'ling country',
                 'to': self.config.miner_address,
                 'amount': reward_amount,
-                'timestamp': time.time(),
+                'fee': 0.0,
+                'timestamp': timestamp,
                 'block_height': block_index,
                 'difficulty': difficulty,
-                'hash': f"reward_{block_index}_{int(time.time())}",
-                'description': f'Block mining reward (Linear: Difficulty {difficulty} = {reward_amount} LKC)',
+                'signature': 'Ling Country',
+                'public_key': 'Ling Country',
+                'version': '2.0',
+                'hash': '',
+                'description': f'Block mining reward (Difficulty {difficulty} = {reward_amount} LKC)',
                 'is_empty_block': False
             }
+            tx['hash'] = sm3_hex(json.dumps({k: v for k, v in tx.items() if k != 'hash'}, sort_keys=True).encode())
+            return tx
         else:
-            return {
+            tx = {
                 'type': 'reward',
-                'from': 'network',
+                'from': 'ling country',
                 'to': self.config.miner_address,
                 'amount': reward_amount,
-                'timestamp': time.time(),
+                'fee': 0.0,
+                'timestamp': timestamp,
                 'block_height': block_index,
                 'difficulty': difficulty,
-                'hash': f"reward_{block_index}_{int(time.time())}",
-                'description': f'Block mining reward (Exponential: Difficulty {difficulty} = {reward_amount} LKC)',
+                'signature': 'ling country',
+                'public_key': 'ling country',
+                'version': '2.0',
+                'hash': '',
+                'description': f'Block mining reward (Difficulty {difficulty} = {reward_amount} LKC)',
                 'is_empty_block': False
             }
+            tx['hash'] = sm3_hex(json.dumps({k: v for k, v in tx.items() if k != 'hash'}, sort_keys=True).encode())
+            return tx
 
     def _cuda_mine(self, block_data: Dict, difficulty: int, stop_event: Optional[threading.Event] = None) -> Optional[Dict]:
         """Mine using CUDA acceleration"""
@@ -2020,10 +2236,24 @@ class Miner:
         
         Returns: (is_valid, error_message)
         """
-        # Validate structure
-        is_valid, error = self.difficulty_system.validate_block_structure(block)
-        if not is_valid:
-            return False, error
+        try:
+            from lunalib.core.daemon import BlockchainDaemon
+            daemon = BlockchainDaemon(
+                self.blockchain_manager,
+                self.mempool_manager,
+                security_manager=self.security_manager,
+                max_workers=1,
+            )
+            result = daemon.validate_block(block)
+            if result.get("valid"):
+                return True, ""
+            message = result.get("message", "Block validation failed")
+            errors = result.get("errors") or []
+            if errors:
+                message = f"{message}: {errors}"
+            return False, message
+        except Exception as e:
+            return False, f"Daemon-style validation failed: {e}"
         
         # Validate hash meets difficulty
         block_hash = block.get('hash', '')
@@ -2049,20 +2279,33 @@ class Miner:
         reward_tx = next((tx for tx in transactions if tx.get('type') == 'reward'), None)
         non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
         is_empty_block = not non_reward_txs or (len(transactions) == 1 and reward_tx and reward_tx.get('is_empty_block', False))
+        tx_count = len(non_reward_txs)
+        fees_total = sum(
+            float(tx.get("fee", 0) or 0)
+            for tx in non_reward_txs
+            if str(tx.get("type") or "").lower() == "transaction"
+        )
+        gtx_denom_total = 0.0
+        for tx in non_reward_txs:
+            if str(tx.get("type") or "").lower() in {"gtx_genesis", "genesis_bill"}:
+                denom = float(tx.get("amount", tx.get("denomination", 0)) or 0)
+                gtx_denom_total += self.difficulty_system.gtx_reward_units(denom)
         
-        if is_empty_block:
-            # Empty block: linear reward
-            expected_reward = float(difficulty)
-        else:
-            # Regular block: exponential reward
-            expected_reward = self.difficulty_system.calculate_block_reward(difficulty)
+        expected_reward = self._calculate_expected_block_reward(
+            difficulty,
+            block.get("index"),
+            tx_count,
+            fees_total,
+            gtx_denom_total,
+            is_empty_block,
+        )
         
         reward_tx_amount = reward_tx.get('amount', 0) if reward_tx else None
         actual_reward = block.get('reward', reward_tx_amount if reward_tx_amount is not None else 0)
         
         # Allow some tolerance for floating point comparison
         if abs(actual_reward - expected_reward) > 0.01:
-            reward_type = "Linear" if is_empty_block else "Exponential"
+            reward_type = "Linear" if is_empty_block or self._resolve_reward_mode() == "linear" else "Exponential"
             return False, f"Reward mismatch ({reward_type}): expected {expected_reward} LKC for difficulty {difficulty}, got {actual_reward} LKC"
         
         reward_type = "Linear" if is_empty_block else "Exponential"

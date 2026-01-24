@@ -41,6 +41,7 @@ def _refresh_tx_caches(self):
         max_range=max_range if max_range > 0 else None,
     )
     pending = mempool.get_pending_transactions(self.current_wallet_address, fetch_remote=True)
+    pending = self._filter_zero_amount_transfers(pending)
     norm = self._normalize_address(self.current_wallet_address)
     self._confirmed_tx_cache[self.current_wallet_address] = confirmed
     self._pending_tx_cache[self.current_wallet_address] = pending
@@ -311,8 +312,8 @@ class LunaWallet:
         reward_txs = [
             tx
             for tx in confirmed
-            if tx.get("type", "").lower() in ["reward", "mining", "gtx_genesis"]
-            or tx.get("from") == "network"
+                if tx.get("type", "").lower() in ["reward", "mining", "gtx_genesis"]
+                or str(tx.get("from") or "").lower() in {"ling country", "ling country mines", "foreign exchange", "network", "block_reward", "mining_reward", "coinbase"}
         ]
 
         return {
@@ -348,6 +349,29 @@ class LunaWallet:
             return ""
         addr_str = str(addr).strip("'\" ").lower()
         return addr_str[4:] if addr_str.startswith("lun_") else addr_str
+
+    def _is_zero_amount_transfer(self, transaction: Dict) -> bool:
+        tx_type = (transaction.get("type") or "").lower()
+        if tx_type not in ("transfer", "transaction"):
+            return False
+        amount = transaction.get(
+            "amount",
+            transaction.get(
+                "transfer_amount",
+                transaction.get("value", transaction.get("denomination", transaction.get("quantity"))),
+            ),
+        )
+        if amount is None:
+            return False
+        try:
+            return float(amount) <= 0
+        except (TypeError, ValueError):
+            return False
+
+    def _filter_zero_amount_transfers(self, transactions: List[Dict]) -> List[Dict]:
+        if not transactions:
+            return transactions
+        return [tx for tx in transactions if not self._is_zero_amount_transfer(tx)]
 
     def _reset_current_wallet(self):
         """Reset current wallet to empty state"""
@@ -623,7 +647,7 @@ class LunaWallet:
                 except Exception:
                     confirmations = None
 
-            if tx_type == "reward" or tx.get("from") == "network":
+            if tx_type == "reward" or str(tx.get("from") or "").lower() in {"ling country", "ling country mines", "foreign exchange", "network", "block_reward", "mining_reward", "coinbase"}:
                 print(f"[DEBUG] reward tx: {tx}, confirmations={confirmations}")
                 # block_heightやcurrent_heightがNoneならとりあえず加算
                 if confirmations is None or confirmations >= required_conf:
@@ -666,7 +690,7 @@ class LunaWallet:
                 pending_out += amount + fee
             if to_norm == target_norm:
                 # For rewards, only count as pending if confirmations < 6
-                if tx_type == "reward" or tx.get("from") == "network":
+                if tx_type == "reward" or str(tx.get("from") or "").lower() in {"ling country", "ling country mines", "foreign exchange", "network", "block_reward", "mining_reward", "coinbase"}:
                     if confirmations is not None and confirmations < required_conf:
                         pending_in += amount
                 else:
@@ -738,10 +762,11 @@ class LunaWallet:
 
             normalized_pending: Dict[str, List[Dict]] = {}
             for addr, txs in pending_map.items():
-                normalized_pending[addr] = txs
+                filtered = self._filter_zero_amount_transfers(txs)
+                normalized_pending[addr] = filtered
                 norm = self._normalize_address(addr)
                 if norm:
-                    normalized_pending[norm] = txs
+                    normalized_pending[norm] = filtered
 
             self._confirmed_tx_cache = normalized_confirmed
             self._pending_tx_cache = normalized_pending
@@ -823,10 +848,11 @@ class LunaWallet:
                 self._confirmed_tx_cache.setdefault(norm, []).extend(txs)
 
         for addr, txs in pending_map.items():
-            self._pending_tx_cache[addr] = txs
+            filtered = self._filter_zero_amount_transfers(txs)
+            self._pending_tx_cache[addr] = filtered
             norm = self._normalize_address(addr)
             if norm:
-                self._pending_tx_cache[norm] = txs
+                self._pending_tx_cache[norm] = filtered
 
         return self._recompute_balances_from_cache()
 
@@ -1094,6 +1120,8 @@ class LunaWallet:
                 )
                 addr = self.current_wallet_address or self.address
                 if addr:
+                    if self._is_zero_amount_transfer(pending_tx):
+                        print("DEBUG: Skipping zero-amount pending transfer")
                     pending_list = self._pending_tx_cache.get(addr, [])
                     # Avoid duplicates by hash
                     tx_hash = pending_tx.get("hash")
@@ -1401,12 +1429,12 @@ class LunaWallet:
                 self._pending_tx_cache[norm_addr] = pending_txs
 
             # Separate rewards and transfers based on type and source
-            # Rewards: explicitly marked as reward/mining type, or from network
+            # Rewards: explicitly marked as reward/mining type, or from Ling Country
             reward_txs = [
                 tx
                 for tx in confirmed_txs
                 if tx.get("type", "").lower() in ["reward", "mining", "gtx_genesis"]
-                or tx.get("from") == "network"
+                or str(tx.get("from") or "").lower() == "ling country"
             ]
 
             # Transfers: anything that's NOT a reward (includes both incoming and outgoing)
@@ -1414,7 +1442,7 @@ class LunaWallet:
                 tx
                 for tx in confirmed_txs
                 if tx.get("type", "").lower() not in ["reward", "mining", "gtx_genesis"]
-                and tx.get("from") != "network"
+                and str(tx.get("from") or "").lower() != "ling country"
             ]
 
             # Separate incoming vs outgoing transfers
@@ -1498,6 +1526,13 @@ class LunaWallet:
     def import_wallet(self, wallet_data, password=None):
         """Import wallet from data"""
         if isinstance(wallet_data, dict):
+            from lunalib.utils.validation import validate_wallet_import
+
+            ok, message = validate_wallet_import(wallet_data)
+            if not ok:
+                print(f"DEBUG: Wallet import validation failed: {message}")
+                return False
+
             address = wallet_data.get("address")
             if not address:
                 return False

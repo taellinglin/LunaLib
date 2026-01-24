@@ -4,8 +4,11 @@ import threading
 import os
 import gzip
 import re
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Callable
+from lunalib.utils.validation import is_valid_address
+from lunalib.core.sm3 import sm3_hex, sm3_compact_hash, sm3_digest
 import json
 from datetime import datetime
 
@@ -269,14 +272,52 @@ class BlockchainDaemon:
             
             if not self.difficulty_system.validate_block_hash(block_hash, difficulty):
                 errors.append(f"Hash doesn't meet difficulty {difficulty} requirement (needs {difficulty} leading zeros)")
+
+            # Validate PoW hash using SM3 (miner/daemon canonical format)
+            try:
+                pow_payload = {
+                    "difficulty": int(difficulty),
+                    "index": int(block.get("index", 0)),
+                    "miner": str(block.get("miner", "")),
+                    "nonce": int(block.get("nonce", 0)),
+                    "previous_hash": str(block.get("previous_hash", "")),
+                    "timestamp": float(block.get("timestamp", 0.0)),
+                    "transactions": [],
+                    "version": "1.0",
+                }
+                pow_string = json.dumps(pow_payload, sort_keys=True)
+                pow_hash = sm3_hex(pow_string.encode())
+                if pow_hash != block_hash:
+                    compact_ok = False
+                    try:
+                        prev_hash = str(block.get("previous_hash", ""))
+                        if len(prev_hash) == 64:
+                            prev_bytes = bytes.fromhex(prev_hash)
+                            miner_hash = sm3_digest(str(block.get("miner", "")).encode())
+                            base = (
+                                prev_bytes
+                                + int(block.get("index", 0)).to_bytes(4, "big", signed=False)
+                                + int(difficulty).to_bytes(4, "big", signed=False)
+                                + struct.pack(">d", float(block.get("timestamp", 0.0)))
+                                + miner_hash
+                            )
+                            if len(base) == 80:
+                                nonce = int(block.get("nonce", 0))
+                                compact_hash = sm3_compact_hash(base, nonce).hex()
+                                compact_ok = compact_hash == block_hash
+                    except Exception:
+                        compact_ok = False
+                    if not compact_ok:
+                        errors.append(f"SM3 hash mismatch: expected {pow_hash[:16]}..., got {str(block_hash)[:16]}...")
+            except Exception as e:
+                errors.append(f"SM3 hash validation error: {e}")
             
-            # Validate reward matches difficulty
-            # Empty blocks use LINEAR system (difficulty = reward)
-            # Regular blocks use EXPONENTIAL system (10^(difficulty-1))
+            # Validate reward matches difficulty/height/base reward
             transactions = block.get('transactions', [])
             reward_tx = next((tx for tx in transactions if tx.get('type') == 'reward'), None)
             non_reward_txs = [tx for tx in transactions if tx.get('type') != 'reward']
             is_empty_block = not non_reward_txs or (len(transactions) == 1 and reward_tx and reward_tx.get('is_empty_block', False))
+            tx_count = len(non_reward_txs)
 
             fees_total = 0.0
             for tx in non_reward_txs:
@@ -287,24 +328,80 @@ class BlockchainDaemon:
                     fees_total += self._parse_amount(fee_value or 0)
                 except Exception:
                     continue
+            gtx_denom_total = 0.0
+            for tx in non_reward_txs:
+                try:
+                    if str(tx.get("type") or "").lower() in {"gtx_genesis", "genesis_bill"}:
+                        denom = self._parse_amount(tx.get("amount", tx.get("denomination", 0)) or 0)
+                        gtx_denom_total += self.difficulty_system.gtx_reward_units(denom)
+                except Exception:
+                    continue
             
-            if is_empty_block:
-                # Empty block: linear reward (difficulty 1 = 1 LKC, difficulty 2 = 2 LKC, etc.)
-                expected_reward = float(difficulty)
+            reward_mode = os.getenv("LUNALIB_BLOCK_REWARD_MODE", "exponential").lower().strip()
+            base_reward = None
+            if is_empty_block or reward_mode == "linear":
+                base_reward = float(difficulty or 0)
                 reward_type = "Linear"
             else:
-                # Regular block: reward mode can be linear or exponential
-                reward_mode = os.getenv("LUNALIB_BLOCK_REWARD_MODE", "exponential").lower().strip()
-                if reward_mode == "linear":
-                    expected_reward = float(difficulty)
-                    reward_type = "Linear"
-                else:
-                    expected_reward = self.difficulty_system.calculate_block_reward(difficulty)
-                    reward_type = "Exponential"
+                reward_type = "Exponential"
 
-            if fees_total > 0:
-                expected_reward += fees_total
+            reward_block_height = block.get("index")
+            if reward_tx and reward_tx.get("block_height") is not None:
+                reward_block_height = reward_tx.get("block_height")
+
+            expected_reward = self.difficulty_system.calculate_block_reward(
+                difficulty,
+                block_height=reward_block_height,
+                tx_count=0 if is_empty_block else tx_count,
+                fees_total=0.0 if is_empty_block else fees_total,
+                gtx_denom_total=0.0 if is_empty_block else gtx_denom_total,
+                base_reward=base_reward,
+            )
+            if is_empty_block:
+                try:
+                    empty_mult = float(os.getenv("LUNALIB_EMPTY_BLOCK_MULT", "0.0001"))
+                except Exception:
+                    empty_mult = 0.0001
+                expected_reward = max(0.0, expected_reward * empty_mult)
             
+            if reward_tx:
+                required_reward_fields = [
+                    "type",
+                    "from",
+                    "to",
+                    "amount",
+                    "fee",
+                    "timestamp",
+                    "block_height",
+                    "difficulty",
+                    "signature",
+                    "public_key",
+                    "version",
+                    "hash",
+                ]
+                missing = [f for f in required_reward_fields if f not in reward_tx]
+                if missing:
+                    errors.append(f"Reward transaction missing fields: {missing}")
+
+                if reward_tx.get("block_height") != block.get("index"):
+                    errors.append("Reward transaction block_height mismatch")
+                if reward_tx.get("difficulty") != difficulty:
+                    errors.append("Reward transaction difficulty mismatch")
+
+                try:
+                    if abs(float(reward_tx.get("timestamp", 0)) - float(block.get("timestamp", 0))) > 5:
+                        errors.append("Reward timestamp does not match block timestamp")
+                except Exception:
+                    errors.append("Invalid reward timestamp")
+
+                try:
+                    tx_copy = {k: v for k, v in reward_tx.items() if k != "hash"}
+                    expected_hash = sm3_hex(json.dumps(tx_copy, sort_keys=True).encode())
+                    if str(reward_tx.get("hash")) != expected_hash:
+                        errors.append("Reward transaction hash mismatch")
+                except Exception as e:
+                    errors.append(f"Reward hash validation error: {e}")
+
             reward_tx_amount = self._parse_amount(reward_tx.get('amount', 0)) if reward_tx else None
             actual_reward = self._parse_amount(block.get('reward', reward_tx_amount if reward_tx_amount is not None else 0))
             if reward_tx_amount is not None and block.get('reward') is not None and abs(self._parse_amount(block.get('reward', 0)) - self._parse_amount(reward_tx_amount)) > 0.01:
@@ -313,6 +410,26 @@ class BlockchainDaemon:
             # Allow small tolerance for floating point comparison
             if abs(actual_reward - expected_reward) > 0.01:
                 errors.append(f"Reward mismatch ({reward_type}): expected {expected_reward} LKC for difficulty {difficulty}, got {actual_reward} LKC")
+
+            if reward_tx:
+                allowed_senders = {
+                    "network",
+                    "block_reward",
+                    "mining_reward",
+                    "coinbase",
+                    "ling country",
+                    "ling country mines",
+                    "foreign exchange",
+                }
+                sender = str(reward_tx.get("from") or "").lower().strip()
+                sig = str(reward_tx.get("signature") or "").lower().strip()
+                pub = str(reward_tx.get("public_key") or "").lower().strip()
+                if sender and sender not in allowed_senders:
+                    errors.append(f"Invalid reward sender: {reward_tx.get('from')}. Must be one of {sorted(allowed_senders)}")
+                if sig and sig not in allowed_senders:
+                    errors.append("Invalid reward signature")
+                if pub and pub not in allowed_senders:
+                    errors.append("Invalid reward public key")
             
             # Validate transactions
             txs = block.get('transactions', [])
@@ -353,7 +470,7 @@ class BlockchainDaemon:
                 for field in ('from', 'to', 'amount', 'timestamp', 'signature', 'public_key'):
                     if field not in transaction:
                         return {'valid': False, 'message': f'Missing field: {field}', 'errors': [f'Missing field: {field}']}
-                if not str(transaction.get('from', '')).startswith('LUN_') or not str(transaction.get('to', '')).startswith('LUN_'):
+                if not is_valid_address(str(transaction.get('from', ''))) or not is_valid_address(str(transaction.get('to', ''))):
                     return {'valid': False, 'message': 'Invalid address format', 'errors': ['Invalid address format']}
                 try:
                     if self._parse_amount(transaction.get('amount', 0)) <= 0:
@@ -380,12 +497,16 @@ class BlockchainDaemon:
             elif tx_type == 'genesis_bill':
                 if 'denomination' not in transaction:
                     errors.append("Missing denomination for genesis bill")
+                if not is_valid_address(str(transaction.get('to', ''))):
+                    errors.append("Invalid address format")
             
             elif tx_type == 'reward':
                 required = ['to', 'amount']
                 for field in required:
                     if field not in transaction:
                         errors.append(f"Missing field: {field}")
+                if not is_valid_address(str(transaction.get('to', ''))):
+                    errors.append("Invalid address format")
             
             # Security validation if available
             if self.security and not errors:

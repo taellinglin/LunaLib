@@ -51,6 +51,7 @@ class P2PClient:
         self._seen_block_max = int(os.getenv("LUNALIB_SEEN_BLOCK_MAX", "5000"))
         self.use_msgpack = bool(int(os.getenv("LUNALIB_USE_MSGPACK", "0"))) and _HAS_MSGPACK
         self.p2p_gzip = bool(int(os.getenv("LUNALIB_P2P_GZIP", "1")))
+        self.enable_latest_endpoint_sync = bool(int(os.getenv("LUNALIB_ENABLE_LATEST_ENDPOINT", "0")))
         self._seen_txs = set()
         self._seen_blocks = set()
         self._seen_tx_order = deque()
@@ -276,14 +277,17 @@ class P2PClient:
                     self._update_peer_list()
                 
                 # Periodic primary node validation
-                if current_time - self.last_primary_check > self.primary_check_interval:
-                    self._validate_with_primary()
+                if self.enable_latest_endpoint_sync:
+                    if current_time - self.last_primary_check > self.primary_check_interval:
+                        self._validate_with_primary()
                 
                 # Sync with primary/base before peers
-                self._sync_from_primary()
+                if self.enable_latest_endpoint_sync:
+                    self._sync_from_primary()
 
                 # Sync with peers
-                self._sync_from_peers()
+                if self.enable_latest_endpoint_sync:
+                    self._sync_from_peers()
                 
                 # Process message queue
                 self._process_messages()

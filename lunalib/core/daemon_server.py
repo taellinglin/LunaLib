@@ -13,6 +13,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
+from lunalib.utils.validation import (
+    validate_transaction_payload,
+    validate_block_payload,
+    validate_gtx_genesis_payload,
+)
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -36,7 +41,10 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self):
+        max_len = int(os.getenv("LUNALIB_MAX_REQUEST_BYTES", "262144"))
         length = int(self.headers.get("Content-Length", "0"))
+        if max_len > 0 and length > max_len:
+            return {"_error": "Request too large"}
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
@@ -92,6 +100,15 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
         if parsed.path in ("/mempool/add", "/api/mempool/add"):
             tx = self._read_json()
+            if tx.get("_error"):
+                return self._json(413, {"success": False, "error": tx.get("_error")})
+            ok, message = validate_transaction_payload(tx)
+            if not ok:
+                return self._json(400, {"success": False, "error": message})
+            if str(tx.get("type") or "").lower() in ("gtx_genesis", "genesis_bill"):
+                ok, message = validate_gtx_genesis_payload(tx)
+                if not ok:
+                    return self._json(400, {"success": False, "error": message})
             validation = self.daemon_ref.validate_transaction(tx)
             if validation.get("valid"):
                 self.mempool_ref.add_transaction(tx)
@@ -100,23 +117,63 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
         if parsed.path in ("/mempool/add/batch", "/api/mempool/add/batch"):
             payload = self._read_json()
+            if isinstance(payload, dict) and payload.get("_error"):
+                return self._json(413, {"success": False, "error": payload.get("_error")})
             txs = payload.get("transactions", []) if isinstance(payload, dict) else payload
+            cleaned = []
+            for tx in txs or []:
+                ok, message = validate_transaction_payload(tx)
+                if not ok:
+                    continue
+                if str(tx.get("type") or "").lower() in ("gtx_genesis", "genesis_bill"):
+                    ok, _ = validate_gtx_genesis_payload(tx)
+                    if not ok:
+                        continue
+                cleaned.append(tx)
+            txs = cleaned
             result = self.daemon_ref.process_incoming_transactions_batch(txs)
             return self._json(200, result)
 
         if parsed.path == "/api/transactions/new":
             tx = self._read_json()
+            if tx.get("_error"):
+                return self._json(413, {"success": False, "error": tx.get("_error")})
+            ok, message = validate_transaction_payload(tx)
+            if not ok:
+                return self._json(400, {"success": False, "error": message})
+            if str(tx.get("type") or "").lower() in ("gtx_genesis", "genesis_bill"):
+                ok, message = validate_gtx_genesis_payload(tx)
+                if not ok:
+                    return self._json(400, {"success": False, "error": message})
             result = self.daemon_ref.process_incoming_transaction(tx)
             return self._json(200, result)
 
         if parsed.path == "/api/transactions/new/batch":
             payload = self._read_json()
+            if isinstance(payload, dict) and payload.get("_error"):
+                return self._json(413, {"success": False, "error": payload.get("_error")})
             txs = payload.get("transactions", []) if isinstance(payload, dict) else payload
+            cleaned = []
+            for tx in txs or []:
+                ok, message = validate_transaction_payload(tx)
+                if not ok:
+                    continue
+                if str(tx.get("type") or "").lower() in ("gtx_genesis", "genesis_bill"):
+                    ok, _ = validate_gtx_genesis_payload(tx)
+                    if not ok:
+                        continue
+                cleaned.append(tx)
+            txs = cleaned
             result = self.daemon_ref.process_incoming_transactions_batch(txs)
             return self._json(200, result)
 
         if parsed.path == "/api/blocks/new":
             block = self._read_json()
+            if block.get("_error"):
+                return self._json(413, {"success": False, "error": block.get("_error")})
+            ok, message = validate_block_payload(block)
+            if not ok:
+                return self._json(400, {"success": False, "error": message})
             result = self.daemon_ref.process_incoming_block(block)
             return self._json(200, result)
 

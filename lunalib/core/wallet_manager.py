@@ -18,7 +18,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import json
 from datetime import datetime
-from lunalib.utils.console import print_info, print_success
+from lunalib.utils.console import print_info, print_success, print_warn
+from lunalib.utils.validation import is_valid_address
 
 
 class TransactionType(Enum):
@@ -219,6 +220,9 @@ class WalletStateManager:
     
     def register_wallet(self, address: str) -> WalletState:
         """Register a new wallet to track"""
+        if not is_valid_address(address):
+            print_warn(f"⚠️  Invalid wallet address rejected: {address}")
+            return WalletState(address=address)
         with self.state_lock:
             if address not in self.wallet_states:
                 self.wallet_states[address] = WalletState(address=address)
@@ -256,7 +260,8 @@ class WalletStateManager:
         tx_type_lower = (tx.type or '').lower()
         
         # Categorize by type
-        if (tx_type_lower == 'reward' or tx.from_address == 'network') and self._addresses_match(tx.to_address, address):
+        reward_sender = str(tx.from_address or '').lower()
+        if (tx_type_lower == 'reward' or reward_sender in {'ling country', 'ling country mines', 'foreign exchange', 'network', 'block_reward', 'mining_reward', 'coinbase'}) and self._addresses_match(tx.to_address, address):
             categories.append('rewards')
         elif tx_type_lower == 'gtx_genesis':
             categories.append('genesis_transactions')
@@ -426,7 +431,7 @@ class WalletStateManager:
             elif self._addresses_match(tx.to_address, address):
                 # Incoming: add amount
                 confirmed_balance += tx.amount
-            elif (tx.type == 'reward' or tx.from_address == 'network') and self._addresses_match(tx.to_address, address):
+            elif (tx.type == 'reward' or str(tx.from_address or '').lower() in {'ling country', 'ling country mines', 'foreign exchange', 'network', 'block_reward', 'mining_reward', 'coinbase'}) and self._addresses_match(tx.to_address, address):
                 # Reward received
                 confirmed_balance += tx.amount
         

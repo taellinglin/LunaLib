@@ -81,8 +81,8 @@ class TestTransactions:
         )
         
         assert reward_tx['type'] == 'reward'
-        assert reward_tx['from'] == 'network'
-        assert reward_tx['amount'] == 50.0
+        assert reward_tx['from'] == 'ling country'
+        assert reward_tx['amount'] == 00.0001
         assert reward_tx['block_height'] == 1000
 
     def test_transaction_risk_assessment(self, test_wallet, sample_transaction_data):

@@ -7,6 +7,7 @@ else:
 import json
 import time
 from typing import Dict, List, Optional, Any
+from lunalib.utils.validation import is_valid_address, is_safe_text
 from .indexeddb import IndexedDBStore
 
 # --- Unicode-safe print for Windows console ---
@@ -154,6 +155,14 @@ class WalletDatabase:
     def save_wallet(self, wallet_data: Dict) -> bool:
         """Save wallet to database"""
         try:
+            address = wallet_data.get("address")
+            if not is_valid_address(address):
+                safe_print("Save wallet error: invalid address")
+                return False
+            label = wallet_data.get('label', '')
+            if label and not is_safe_text(label, max_len=128):
+                safe_print("Save wallet error: invalid label")
+                return False
             if self._use_indexeddb and self._idb:
                 return self._idb.put("wallets", wallet_data["address"], wallet_data)
             conn = sqlite3.connect(self.db_path)
@@ -164,8 +173,8 @@ class WalletDatabase:
                 (address, label, public_key, encrypted_private_key, balance, created, last_accessed, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                wallet_data['address'],
-                wallet_data.get('label', ''),
+                address,
+                label,
                 wallet_data.get('public_key', ''),
                 wallet_data.get('encrypted_private_key', ''),
                 wallet_data.get('balance', 0.0),
@@ -214,6 +223,17 @@ class WalletDatabase:
     def save_transaction(self, transaction: Dict, wallet_address: str) -> bool:
         """Save transaction to database"""
         try:
+            if not is_valid_address(wallet_address):
+                safe_print("Save transaction error: invalid wallet address")
+                return False
+            from_addr = transaction.get('from', '')
+            to_addr = transaction.get('to', '')
+            if from_addr and not is_valid_address(from_addr):
+                safe_print("Save transaction error: invalid from address")
+                return False
+            if to_addr and not is_valid_address(to_addr):
+                safe_print("Save transaction error: invalid to address")
+                return False
             if self._use_indexeddb and self._idb:
                 tx_hash = transaction.get("hash", "")
                 payload = {

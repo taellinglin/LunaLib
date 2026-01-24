@@ -20,6 +20,7 @@ from typing import Dict, Optional, Tuple, List
 from ..core.mempool import MempoolManager
 from .validator import TransactionValidator
 from lunalib.utils.hash import sm3_hex
+from lunalib.utils.validation import is_valid_address, sanitize_memo
 
 # Import REAL SM2 KeyManager from crypto module
 try:
@@ -97,6 +98,12 @@ class TransactionManager:
                         private_key: Optional[str] = None, memo: str = "",
                         transaction_type: str = "transfer", public_key: Optional[str] = None) -> Dict:
         """Create and sign a transaction"""
+
+        if transaction_type in ("transfer", "transaction"):
+            if not is_valid_address(from_address) or not is_valid_address(to_address):
+                raise ValueError("Invalid from/to address")
+            if float(amount) <= 0:
+                raise ValueError("Amount must be positive")
         
         # Calculate fee
         fee = self.fee_calculator.get_fee(transaction_type)
@@ -109,7 +116,7 @@ class TransactionManager:
             "fee": fee,
             "nonce": int(time.time() * 1000),
             "timestamp": int(time.time()),
-            "memo": memo,
+            "memo": sanitize_memo(memo),
             "version": "2.0"  # Version 2.0 = SM2 signatures
         }
         
@@ -289,17 +296,17 @@ class TransactionManager:
         """Create reward transaction"""
         transaction = {
             "type": "reward",
-            "from": "network",
+            "from": "ling country",
             "to": to_address,
             "amount": float(amount),
             "fee": 0.0,
             "block_height": block_height,
             "timestamp": int(time.time()),
-            "signature": "system",
-            "public_key": "system",
+            "signature": "ling country",
+            "public_key": "ling country",
             "version": "2.0"
         }
-        transaction["hash"] = self._generate_reward_hash(to_address, amount, block_height)
+        transaction["hash"] = self._calculate_transaction_hash(transaction)
         return transaction
     
     # VALIDATION METHODS

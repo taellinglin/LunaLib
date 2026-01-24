@@ -16,8 +16,20 @@ def safe_print(*args, **kwargs):
         print_info(msg)
 import hashlib
 from lunalib.utils.hash import sm3_hex
+from lunalib.utils.validation import is_valid_address
 from typing import Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor
+
+_REWARD_SENDERS = {
+    "network",
+    "block_reward",
+    "mining_reward",
+    "coinbase",
+    "ling country",
+    "ling country mines",
+    "foreign exchange",
+}
+
 
 class TransactionSecurity:
     """Enhanced transaction security system with SM2 support"""
@@ -98,7 +110,7 @@ class TransactionSecurity:
 
             from_addr = transaction.get("from", "")
             to_addr = transaction.get("to", "")
-            if not from_addr.startswith("LUN_") or not to_addr.startswith("LUN_"):
+            if not is_valid_address(from_addr) or not is_valid_address(to_addr):
                 return False, "Invalid address format"
 
             try:
@@ -114,6 +126,11 @@ class TransactionSecurity:
                 return False, "Missing signature or public key"
             if len(sig) != 128:
                 return False, "Invalid signature length"
+
+        if tx_type in ("reward", "gtx_genesis", "genesis_bill"):
+            to_addr = transaction.get("to", "")
+            if not is_valid_address(to_addr):
+                return False, "Invalid address format"
 
         return True, "OK"
 
@@ -174,6 +191,9 @@ class TransactionSecurity:
         for field in required_fields:
             if field not in transaction:
                 return False, f"Missing GTX field: {field}"
+
+        if not self._validate_tx_hash(transaction):
+            return False, "Invalid transaction hash"
         
         # Validate denomination
         denomination = transaction.get("denomination")
@@ -194,9 +214,17 @@ class TransactionSecurity:
             if field not in transaction:
                 return False, f"Missing reward field: {field}"
         
-        # Only network can create rewards
-        if transaction.get("from") != "network":
-            return False, "Unauthorized reward creation"
+        sender = str(transaction.get("from") or "").lower().strip()
+        if sender not in _REWARD_SENDERS:
+            return False, f"Invalid reward sender: {transaction.get('from')}. Must be one of {sorted(_REWARD_SENDERS)}"
+
+        sig = str(transaction.get("signature") or "").lower().strip()
+        pub = str(transaction.get("public_key") or "").lower().strip()
+        if sig not in _REWARD_SENDERS or pub not in _REWARD_SENDERS:
+            return False, "Invalid reward signature"
+
+        if not self._validate_tx_hash(transaction):
+            return False, "Invalid transaction hash"
         
         return True, "Valid reward transaction"
     
@@ -219,6 +247,9 @@ class TransactionSecurity:
         if fee < self.required_fee:
             return False, f"Insufficient fee: {fee} (required: {self.required_fee})"
         
+        if not self._validate_tx_hash(transaction):
+            return False, "Invalid transaction hash"
+
         # SM2 Signature validation
         if not self._validate_signature_sm2(transaction):
             return False, "Invalid SM2 signature"
@@ -239,6 +270,9 @@ class TransactionSecurity:
         for field in required_fields:
             if field not in transaction:
                 return False, f"Missing field: {field}"
+
+        if not self._validate_tx_hash(transaction):
+            return False, "Invalid transaction hash"
 
         amount = transaction.get("amount", 0)
         if amount < self.min_transaction_amount:
@@ -336,6 +370,20 @@ class TransactionSecurity:
         transaction["_signing_data"] = signing
         transaction["_signing_hash"] = sm3_hex(signing.encode())
         return signing
+
+    def _calculate_transaction_hash(self, transaction: Dict) -> str:
+        """Calculate deterministic transaction hash (matches TransactionManager)."""
+        tx_copy = transaction.copy()
+        tx_copy.pop("hash", None)
+        import json
+        data_string = json.dumps(tx_copy, sort_keys=True)
+        return sm3_hex(data_string.encode())
+
+    def _validate_tx_hash(self, transaction: Dict) -> bool:
+        """Validate transaction hash matches deterministic calculation."""
+        tx_hash = transaction.get("hash") or ""
+        expected = self._calculate_transaction_hash(transaction)
+        return str(tx_hash) == str(expected)
     
     def _validate_mining_proof(self, transaction: Dict) -> bool:
         """Validate mining proof-of-work"""

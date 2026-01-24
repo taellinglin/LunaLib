@@ -4,7 +4,7 @@ Luna Library - Complete cryptocurrency wallet and mining system
 import os
 
 from .core.wallet import LunaWallet
-from .mining.miner import GenesisMiner
+from .mining.miner import GenesisMiner, validate_mining_proof_internal
 from .gtx.genesis import GTXGenesis
 from .transactions.transactions import TransactionManager
 from .core.blockchain import BlockchainManager
@@ -27,5 +27,6 @@ __all__ = [
     'BlockchainManager',
     'MempoolManager',
     'WalletStateManager',
-    'get_wallet_manager'
+    'get_wallet_manager',
+    'validate_mining_proof_internal'
 ]

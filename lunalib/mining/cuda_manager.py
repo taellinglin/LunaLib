@@ -7,13 +7,15 @@ import json
 from lunalib.utils.hash import sm3_hex
 from lunalib.core.sm3 import sm3_digest
 
+_SM3_GPU_ERROR = None
 try:
     from lunalib.mining.sm3_cuda.sm3_gpu import gpu_sm3_hash_messages, gpu_sm3_mine_compact
     _HAS_SM3_GPU = True
-except Exception:
+except Exception as e:
     gpu_sm3_hash_messages = None
     gpu_sm3_mine_compact = None
     _HAS_SM3_GPU = False
+    _SM3_GPU_ERROR = e
 
 try:
     import cupy as cp
@@ -74,6 +76,23 @@ class CUDAManager:
         except Exception as e:
             print(f"❌ CUDA initialization failed: {e}")
             self.cuda_available = False
+
+    def _try_enable_sm3_gpu(self) -> bool:
+        """Attempt to enable the SM3 GPU kernel lazily (after runtime installs)."""
+        global gpu_sm3_hash_messages, gpu_sm3_mine_compact, _HAS_SM3_GPU, _SM3_GPU_ERROR
+        if _HAS_SM3_GPU and gpu_sm3_hash_messages and gpu_sm3_mine_compact:
+            return True
+        try:
+            from lunalib.mining.sm3_cuda.sm3_gpu import gpu_sm3_hash_messages as _hash, gpu_sm3_mine_compact as _mine
+            gpu_sm3_hash_messages = _hash
+            gpu_sm3_mine_compact = _mine
+            _HAS_SM3_GPU = True
+            _SM3_GPU_ERROR = None
+            return True
+        except Exception as e:
+            _SM3_GPU_ERROR = e
+            _HAS_SM3_GPU = False
+            return False
 
     def cuda_mine_multi_gpu_batch(self, mining_data: Dict, difficulty: int, batch_size: int = 1000000,
                                   progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -187,6 +206,10 @@ class CUDAManager:
                 use_gpu_sm3 = use_gpu_sm3 and os.getenv("LUNALIB_CUDA_SM3", "1") != "0"
             else:
                 use_gpu_sm3 = use_gpu_sm3 and bool(cfg_flag)
+            if not use_gpu_sm3 and os.getenv("LUNALIB_FORCE_SM3_GPU", "0") == "1":
+                use_gpu_sm3 = self._try_enable_sm3_gpu()
+            if not use_gpu_sm3 and _SM3_GPU_ERROR:
+                print(f"[CUDA_DIAG] SM3 GPU kernel unavailable: {_SM3_GPU_ERROR}")
             hash_mode = os.getenv("LUNALIB_MINING_HASH_MODE", "json").lower()
             if use_gpu_sm3:
                 print("[CUDA_DIAG] Using GPU SM3 kernel for hashing")

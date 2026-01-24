@@ -49,7 +49,7 @@ sm3_ext = Extension(
 
 setup(
     name="lunalib",
-    version="2.4.8",
+    version="2.5.3",
     author_email="taellinglin@gmail.com",
     description="Cryptocurrency Ecosystem library (LunaLib) by Sanny and Ling Lin",
     long_description="A modular cryptocurrency ecosystem library including blockchain, wallet, mining, storage, and transaction management.",
@@ -70,7 +70,7 @@ setup(
         "msgpack",
     ],
         extras_require={
-            "gpu": ["cupy-cuda12x"],  # Optional: install with pip install lunalib[gpu]
+            "gpu": ["cupy-cuda12x; python_version < '3.12'"],  # Optional: pip install lunalib[gpu]
         },
     classifiers=[
         "Programming Language :: Python :: 3",

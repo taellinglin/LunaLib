@@ -367,12 +367,13 @@ class BlockchainManager:
     def _is_reward_tx(self, tx: Dict) -> bool:
         tx_type = str(tx.get("type") or "").lower()
         desc = str(tx.get("description") or "").lower()
+        reward_from = str(tx.get("from", "") or "").lower()
         return (
             tx_type in {"reward", "coinbase", "mining_reward", "mining", "block_reward"}
             or str(tx.get("hash", "")).startswith("reward_")
-            or (str(tx.get("from", "")) == "network" and ("reward" in desc or "mining" in desc))
-            or (str(tx.get("from", "")) == "network" and tx.get("block_height") is not None)
-            or (str(tx.get("from", "")) == "network" and tx.get("difficulty") is not None)
+            or (reward_from in {"network", "ling country"} and ("reward" in desc or "mining" in desc))
+            or (reward_from in {"network", "ling country"} and tx.get("block_height") is not None)
+            or (reward_from in {"network", "ling country"} and tx.get("difficulty") is not None)
             or ("reward" in tx)
         )
 
@@ -860,7 +861,7 @@ class BlockchainManager:
                         if not any(tx.get('hash') == reward_hash for tx in existing):
                             reward_tx = {
                                 'type': 'reward',
-                                'from': 'network',
+                                'from': 'ling country',
                                 'to': target_addr,
                                 'amount': reward_amount,
                                 'block_height': block.get('index'),
@@ -1129,15 +1130,21 @@ class BlockchainManager:
         try:
             print(f"🔄 Preparing to submit block #{block_data.get('index')}...")
             
-            # Step 1: Validate block structure before submission
-            validation_result = self._validate_block_structure(block_data)
-            if not validation_result['valid']:
-                print(f"❌ Block validation failed:")
-                for issue in validation_result['issues']:
-                    print(f"   - {issue}")
-                return False
-            
-            print(f"✅ Block structure validation passed")
+            # Step 1: Optional validation before submission (default: off)
+            validate_submit = os.getenv("LUNALIB_BLOCK_SUBMIT_VALIDATE", "0") != "0"
+            if validate_submit:
+                validation_result = self._validate_block_structure(block_data)
+                if not validation_result['valid']:
+                    print(f"❌ Block validation failed:")
+                    for issue in validation_result['issues']:
+                        print(f"   - {issue}")
+                    return False
+                print(f"✅ Block structure validation passed")
+            else:
+                if not isinstance(block_data, dict) or "transactions" not in block_data:
+                    print("❌ Block submission rejected: invalid payload")
+                    return False
+
             print(f"   Block #{block_data.get('index')} | Hash: {block_data.get('hash', '')[:16]}...")
             print(f"   Transactions: {len(block_data.get('transactions', []))} | Difficulty: {block_data.get('difficulty')}")
             
@@ -1293,15 +1300,17 @@ class BlockchainManager:
             tx_type = tx.get('type')
             if not tx_type:
                 issues.append(f"Transaction {i} missing 'type' field")
+                continue
+
+            tx_type_lower = str(tx_type).lower()
             
             # Basic transaction validation
-            if tx_type == 'GTX_Genesis':
+            if tx_type_lower in {'gtx_genesis', 'genesis_bill'}:
                 required_tx_fields = ['serial_number', 'denomination', 'issued_to', 'timestamp', 'hash']
                 missing_tx_fields = [field for field in required_tx_fields if field not in tx]
                 if missing_tx_fields:
                     issues.append(f"GTX_Genesis transaction {i} missing fields: {missing_tx_fields}")
-            
-            elif tx_type == 'reward':
+            elif tx_type_lower == 'reward':
                 required_tx_fields = ['to', 'amount', 'timestamp', 'hash']
                 missing_tx_fields = [field for field in required_tx_fields if field not in tx]
                 if missing_tx_fields:
@@ -1337,12 +1346,13 @@ class BlockchainManager:
             to_norm = self._normalize_address(tx.get('to') or tx.get('receiver') or '')
 
             desc = str(tx.get('description', '') or '').lower()
+            reward_from = str(tx.get('from', '') or '').lower()
             reward_hint = (
                 tx_type in {'reward', 'coinbase', 'mining_reward', 'mining', 'block_reward'}
                 or (tx.get('hash', '') or '').startswith('reward_')
-                or (tx.get('from') == 'network' and ('reward' in desc or 'mining' in desc))
-                or (tx.get('from') == 'network' and tx.get('block_height') is not None)
-                or (tx.get('from') == 'network' and tx.get('difficulty') is not None)
+                or (reward_from in {'network', 'ling country', 'ling country mines', 'foreign exchange', 'block_reward', 'mining_reward', 'coinbase'} and ('reward' in desc or 'mining' in desc))
+                or (reward_from in {'network', 'ling country', 'ling country mines', 'foreign exchange', 'block_reward', 'mining_reward', 'coinbase'} and tx.get('block_height') is not None)
+                or (reward_from in {'network', 'ling country', 'ling country mines', 'foreign exchange', 'block_reward', 'mining_reward', 'coinbase'} and tx.get('difficulty') is not None)
                 or ('reward' in tx)
             )
 
@@ -1364,7 +1374,7 @@ class BlockchainManager:
                         'amount': amount,
                         'fee': 0,
                     })
-                    enhanced.setdefault('from', 'network')
+                    enhanced.setdefault('from', 'ling country')
                     results[target_addr].append(enhanced)
                     if miner_addr and target_addr == miner_addr:
                         explicit_reward_found = True
@@ -1410,7 +1420,7 @@ class BlockchainManager:
             if reward_amount > 0:
                 reward_tx = {
                     'type': 'reward',
-                    'from': 'network',
+                    'from': 'ling country',
                     'to': miner_addr,
                     'amount': reward_amount,
                     'block_height': block.get('index'),
@@ -1508,12 +1518,12 @@ class BlockchainManager:
                     enhanced_tx['direction'] = 'incoming'
                     enhanced_tx['effective_amount'] = amount
                     enhanced_tx['fee'] = 0
-                    enhanced_tx.setdefault('from', 'network') # Ensure sender is set
+                    enhanced_tx.setdefault('from', 'ling country') # Ensure sender is set
                     transactions.append(enhanced_tx)
                     explicit_reward_found = True
                     print(f"✅ Found mining reward: {amount} LUN (to: {reward_to_address})")
                     continue  # Move to next transaction
-            if tx.get('from') == 'network':
+            if str(tx.get('from') or '').lower() == 'ling country':
                 reward_to_address = tx.get('to') or tx.get('receiver') or tx.get('issued_to') or tx.get('owner_address') or tx.get('to_address') or ''
                 if addresses_match(reward_to_address, address) and (tx.get('difficulty') is not None or 'reward' in str(tx.get('description', '')).lower()):
                     amount = self._parse_amount(tx.get('amount', tx.get('denomination', tx.get('reward', 0)) or 0))
@@ -1524,7 +1534,7 @@ class BlockchainManager:
                     enhanced_tx.setdefault('type', 'reward')
                     transactions.append(enhanced_tx)
                     explicit_reward_found = True
-                    print(f"✅ Found network reward: {amount} LUN (to: {reward_to_address})")
+                    print(f"✅ Found reward: {amount} LUN (to: {reward_to_address})")
                     continue
             
             # ==================================================================
@@ -1566,7 +1576,7 @@ class BlockchainManager:
             if reward_amount > 0:
                 reward_tx = {
                     'type': 'reward',
-                    'from': 'network',
+                    'from': 'ling country',
                     'to': address,
                     'amount': reward_amount,
                     'block_height': block.get('index'),
