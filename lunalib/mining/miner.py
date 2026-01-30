@@ -656,13 +656,15 @@ class GenesisMiner:
         return tx_hashes[0] if tx_hashes else "0" * 64
     
     def _clear_mined_transactions(self, mined_transactions: List[Dict]):
-        """Remove mined transactions from local mempool"""
+        """Remove mined transactions from local mempool and reload mempool cache from remote endpoints"""
         for tx in mined_transactions:
             tx_hash = tx.get('hash')
             if tx_hash:
                 self.mempool_manager.remove_transaction(tx_hash)
-        
         print(f"Cleared {len(mined_transactions)} mined transactions from mempool")
+        # Reload mempool cache from remote endpoints
+        if hasattr(self.mempool_manager, 'get_pending_transactions'):
+            self.mempool_manager.get_pending_transactions(fetch_remote=True)
     
     def start_auto_bill_mining(self, denominations: List[float], user_address: str, 
                              callback: Callable = None) -> bool:

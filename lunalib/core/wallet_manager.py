@@ -57,7 +57,12 @@ class Transaction:
     
     def to_dict(self) -> Dict:
         """Convert transaction to dictionary"""
-        return asdict(self)
+        data = asdict(self)
+        data.update({
+            "amount_display": format_amount(self.amount),
+            "fee_display": format_amount(self.fee),
+        })
+        return data
 
 
 @dataclass

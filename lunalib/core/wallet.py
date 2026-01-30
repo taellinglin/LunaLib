@@ -430,6 +430,20 @@ class LunaWallet:
             return transactions
         return [tx for tx in transactions if not self._is_zero_amount_transfer(tx)]
 
+    def _attach_amount_display(self, transactions: List[Dict]) -> List[Dict]:
+        if not transactions:
+            return transactions
+        for tx in transactions:
+            if not isinstance(tx, dict):
+                continue
+            if "amount" in tx:
+                tx["amount_display"] = format_amount(tx.get("amount", 0.0))
+            if "fee" in tx:
+                tx["fee_display"] = format_amount(tx.get("fee", 0.0))
+            if "effective_amount" in tx:
+                tx["effective_amount_display"] = format_amount(tx.get("effective_amount", 0.0))
+        return transactions
+
     def _reset_current_wallet(self):
         """Reset current wallet to empty state"""
         self.address = None
@@ -1410,6 +1424,9 @@ class LunaWallet:
                 or tx.get("from") == "network"
             )
 
+            confirmed_txs = self._attach_amount_display(confirmed_txs)
+            pending_txs = self._attach_amount_display(pending_txs)
+
             return {
                 "confirmed": confirmed_txs,
                 "pending": pending_txs,
@@ -1503,6 +1520,8 @@ class LunaWallet:
 
             # Separate rewards and transfers based on type and source
             # Rewards: explicitly marked as reward/mining type, or from Ling Country
+            confirmed_txs = self._attach_amount_display(confirmed_txs)
+            pending_txs = self._attach_amount_display(pending_txs)
             reward_txs = [
                 tx
                 for tx in confirmed_txs
