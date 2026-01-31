@@ -2,6 +2,12 @@
 
 import time
 from lunalib.utils.validation import is_valid_address, sanitize_memo, validate_gtx_genesis_payload
+from lunalib.tolkens.tolkens import (
+    calculate_tolken_fee,
+    is_valid_asset_hash,
+    is_valid_tolken_type,
+    normalize_tolken_type,
+)
 import requests
 import threading
 import sys
@@ -14,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import deque, defaultdict
 import gzip
 import os
+import ssl
 
 try:
     import msgpack  # type: ignore
@@ -38,6 +45,8 @@ class MempoolManager:
         self._broadcast_workers = int(os.getenv("LUNALIB_BROADCAST_PARALLEL", "8"))
         self._broadcast_pool = ThreadPoolExecutor(max_workers=self._broadcast_workers) if self._threading_enabled else None
         self._session = requests.Session()
+        self._ssl_verify = self._resolve_ssl_verify()
+        self._session.verify = self._ssl_verify
         self._pool_size = int(os.getenv("LUNALIB_HTTP_POOL", "16"))
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=self._pool_size,
@@ -78,6 +87,38 @@ class MempoolManager:
         if self._threading_enabled:
             self.broadcast_thread = threading.Thread(target=self._broadcast_worker, daemon=True)
             self.broadcast_thread.start()
+
+    def _resolve_ssl_verify(self):
+        """Resolve SSL verification settings for HTTPS requests without certifi."""
+        verify_flag = str(os.getenv("LUNALIB_SSL_VERIFY", "1")).strip().lower()
+        if verify_flag in {"0", "false", "no"}:
+            if self.verbose:
+                print("DEBUG: SSL verification disabled via LUNALIB_SSL_VERIFY")
+            return False
+
+        ca_bundle = (
+            os.getenv("LUNALIB_CA_BUNDLE", "").strip()
+            or os.getenv("REQUESTS_CA_BUNDLE", "").strip()
+            or os.getenv("SSL_CERT_FILE", "").strip()
+        )
+        if ca_bundle:
+            if self.verbose:
+                print(f"DEBUG: Using CA bundle: {ca_bundle}")
+            return ca_bundle
+
+        ca_dir = os.getenv("SSL_CERT_DIR", "").strip()
+        if ca_dir:
+            if self.verbose:
+                print(f"DEBUG: Using CA directory: {ca_dir}")
+            return ca_dir
+
+        paths = ssl.get_default_verify_paths()
+        if paths.cafile and os.path.exists(paths.cafile):
+            return paths.cafile
+        if paths.capath and os.path.exists(paths.capath):
+            return paths.capath
+
+        return True
 
     # ----------------------
     # Address normalization
@@ -714,6 +755,8 @@ class MempoolManager:
         tx_type = (transaction.get("type") or "").lower()
         if tx_type in ("reward", "gtx_genesis", "genesis_bill"):
             required_fields = ['type', 'to', 'amount', 'timestamp', 'hash']
+        elif tx_type == "tolkens":
+            required_fields = ['type', 'from', 'to', 'price', 'fee', 'asset_type', 'asset_hash', 'timestamp', 'hash']
         else:
             required_fields = ['type', 'from', 'to', 'amount', 'timestamp', 'hash']
 
@@ -759,6 +802,46 @@ class MempoolManager:
                 return False
             if not is_valid_address(from_addr) or not is_valid_address(to_addr):
                 print("DEBUG: Invalid address format")
+                return False
+            signature = transaction.get("signature", "")
+            public_key = transaction.get("public_key", "")
+            if not signature or not public_key:
+                print("DEBUG: Missing signature or public key")
+                return False
+            if len(signature) != 128:
+                print("DEBUG: Invalid signature length")
+                return False
+        elif tx_type == "tolkens":
+            if not from_addr or not to_addr:
+                print("DEBUG: Missing from or to address")
+                return False
+            if not is_valid_address(from_addr) or not is_valid_address(to_addr):
+                print("DEBUG: Invalid address format")
+                return False
+            try:
+                price = float(transaction.get("price", 0))
+            except (ValueError, TypeError):
+                print("DEBUG: Invalid price format")
+                return False
+            if price <= 0:
+                print("DEBUG: Invalid price (must be positive)")
+                return False
+            fee = transaction.get("fee", 0)
+            try:
+                fee_val = float(fee)
+            except (ValueError, TypeError):
+                print("DEBUG: Invalid fee format")
+                return False
+            expected_fee = calculate_tolken_fee(price)
+            if fee_val < expected_fee:
+                print("DEBUG: Insufficient tolken fee")
+                return False
+            asset_type = normalize_tolken_type(transaction.get("asset_type"))
+            if not is_valid_tolken_type(asset_type):
+                print("DEBUG: Invalid tolken asset_type")
+                return False
+            if not is_valid_asset_hash(transaction.get("asset_hash")):
+                print("DEBUG: Invalid tolken asset_hash")
                 return False
             signature = transaction.get("signature", "")
             public_key = transaction.get("public_key", "")

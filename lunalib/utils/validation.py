@@ -6,6 +6,7 @@ _ADDRESS_RE = re.compile(r"^LUN_[A-Za-z0-9_]{1,64}$", re.IGNORECASE)
 _HEX_RE = re.compile(r"^[0-9a-f]+$", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
 _GTX_SERIAL_RE = re.compile(r"^GTX-[0-9]+(?:\.[0-9]+)?-[0-9]{8}-[A-Z2-7]{10,32}$")
+_TOLKEN_TYPES = {"midi", "ogg", "png", "svg"}
 
 MAX_TEXT_LEN = 256
 MAX_LABEL_LEN = 128
@@ -84,6 +85,11 @@ def is_valid_gtx_serial(value: Optional[str]) -> bool:
     return bool(_GTX_SERIAL_RE.fullmatch(text))
 
 
+def is_valid_tolken_type(value: Optional[str]) -> bool:
+    text = str(value or "").strip().lower()
+    return text in _TOLKEN_TYPES
+
+
 def validate_wallet_import(wallet_data: Any) -> Tuple[bool, str]:
     if not isinstance(wallet_data, dict):
         return False, "Wallet payload must be an object"
@@ -140,6 +146,29 @@ def validate_transaction_payload(transaction: Any, max_memo_len: int = MAX_MEMO_
             return False, "Invalid amount"
         if amount <= 0:
             return False, "Amount must be positive"
+
+    if tx_type == "tolkens":
+        if not is_valid_address(transaction.get("from")):
+            return False, "Invalid from address"
+        if not is_valid_address(transaction.get("to")):
+            return False, "Invalid to address"
+        try:
+            price = float(transaction.get("price", 0))
+        except Exception:
+            return False, "Invalid price"
+        if price <= 0:
+            return False, "Price must be positive"
+        if not is_valid_tolken_type(transaction.get("asset_type")):
+            return False, "Invalid asset_type"
+        if not is_valid_tx_hash(transaction.get("asset_hash")):
+            return False, "Invalid asset_hash"
+        try:
+            fee = float(transaction.get("fee", 0))
+        except Exception:
+            return False, "Invalid fee"
+        expected_fee = price * 0.0001
+        if fee < expected_fee:
+            return False, "Insufficient fee"
 
     if "memo" in transaction:
         transaction["memo"] = sanitize_memo(transaction.get("memo"), max_len=max_memo_len)

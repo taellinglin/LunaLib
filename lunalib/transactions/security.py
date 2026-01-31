@@ -17,6 +17,12 @@ def safe_print(*args, **kwargs):
 import hashlib
 from lunalib.utils.hash import sm3_hex
 from lunalib.utils.validation import is_valid_address
+from lunalib.tolkens.tolkens import (
+    calculate_tolken_fee,
+    is_valid_asset_hash,
+    is_valid_tolken_type,
+    normalize_tolken_type,
+)
 from typing import Dict, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
@@ -77,6 +83,8 @@ class TransactionSecurity:
             result = self._validate_reward_transaction(transaction)
         elif tx_type == "transfer":
             result = self._validate_transfer_transaction(transaction)
+        elif tx_type == "tolkens":
+            result = self._validate_tolken_transaction(transaction)
         else:
             result = (False, f"Unknown transaction type: {tx_type}")
 
@@ -119,6 +127,36 @@ class TransactionSecurity:
                 return False, "Invalid amount"
             if amount <= 0:
                 return False, "Amount must be positive"
+
+            sig = transaction.get("signature", "")
+            pub = transaction.get("public_key", "")
+            if not sig or not pub:
+                return False, "Missing signature or public key"
+            if len(sig) != 128:
+                return False, "Invalid signature length"
+
+        if tx_type == "tolkens":
+            for field in ("from", "to", "price", "asset_type", "asset_hash"):
+                if field not in transaction:
+                    return False, f"Missing field: {field}"
+
+            from_addr = transaction.get("from", "")
+            to_addr = transaction.get("to", "")
+            if not is_valid_address(from_addr) or not is_valid_address(to_addr):
+                return False, "Invalid address format"
+
+            try:
+                price = float(transaction.get("price", 0))
+            except Exception:
+                return False, "Invalid price"
+            if price <= 0:
+                return False, "Price must be positive"
+
+            if not is_valid_tolken_type(transaction.get("asset_type")):
+                return False, "Invalid asset_type"
+
+            if not is_valid_asset_hash(transaction.get("asset_hash")):
+                return False, "Invalid asset_hash"
 
             sig = transaction.get("signature", "")
             pub = transaction.get("public_key", "")
@@ -263,6 +301,61 @@ class TransactionSecurity:
             return False, "Address is blacklisted"
         
         return True, "Valid transfer transaction"
+
+    def _validate_tolken_transaction(self, transaction: Dict) -> Tuple[bool, str]:
+        """Validate Tolken transaction with fee and signature."""
+        required_fields = [
+            "from",
+            "to",
+            "price",
+            "asset_type",
+            "asset_hash",
+            "signature",
+            "public_key",
+            "nonce",
+            "fee",
+        ]
+        for field in required_fields:
+            if field not in transaction:
+                return False, f"Missing field: {field}"
+
+        if not self._validate_tx_hash(transaction):
+            return False, "Invalid transaction hash"
+
+        try:
+            price = float(transaction.get("price", 0))
+        except Exception:
+            return False, "Invalid price"
+        if price <= 0:
+            return False, "Price must be positive"
+
+        fee = transaction.get("fee", 0)
+        try:
+            fee_val = float(fee)
+        except Exception:
+            return False, "Invalid fee"
+        expected_fee = calculate_tolken_fee(price)
+        if fee_val < expected_fee:
+            return False, f"Insufficient fee: {fee_val} (required: {expected_fee})"
+
+        asset_type = normalize_tolken_type(transaction.get("asset_type"))
+        if not is_valid_tolken_type(asset_type):
+            return False, "Invalid asset_type"
+
+        if not is_valid_asset_hash(transaction.get("asset_hash")):
+            return False, "Invalid asset_hash"
+
+        from_address = transaction.get("from", "")
+        if not self._check_rate_limit(from_address):
+            return False, "Rate limit exceeded"
+
+        if self._is_blacklisted(from_address):
+            return False, "Address is blacklisted"
+
+        if not self._validate_signature_sm2(transaction):
+            return False, "Invalid SM2 signature"
+
+        return True, "Valid tolken transaction"
 
     def _validate_transfer_transaction_no_sig(self, transaction: Dict) -> Tuple[bool, str]:
         """Validate transfer transaction without signature check (assumed verified)."""

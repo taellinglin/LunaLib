@@ -256,8 +256,8 @@ class GenesisMiner:
                 block_height = current_height + 1
                 previous_hash = latest_block.get('hash', '0' * 64) if latest_block else '0' * 64
             
-            # Get transactions from mempool
-            pending_txs = self.mempool_manager.get_pending_transactions()
+            # Always refresh mempool from remote before mining
+            pending_txs = self.mempool_manager.get_pending_transactions(fetch_remote=True)
             transactions = pending_txs[:10]  # Limit block size
             
             if not transactions:
@@ -368,9 +368,11 @@ class GenesisMiner:
                     safe_print("✅ Block successfully submitted to blockchain!")
                     # Clear mined transactions from local mempool
                     self._clear_mined_transactions(transactions)
+                    # Reload mempool cache from remote endpoints after block submit
+                    if hasattr(self.mempool_manager, 'get_pending_transactions'):
+                        self.mempool_manager.get_pending_transactions(fetch_remote=True)
                 else:
                     safe_print("⚠️ Block mined but submission failed")
-                
                 return {
                     "success": True,
                     "type": "block",

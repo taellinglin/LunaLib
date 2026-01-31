@@ -8,6 +8,12 @@ import struct
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Callable
 from lunalib.utils.validation import is_valid_address
+from lunalib.tolkens.tolkens import (
+    calculate_tolken_fee,
+    is_valid_asset_hash,
+    is_valid_tolken_type,
+    normalize_tolken_type,
+)
 from lunalib.core.sm3 import sm3_hex, sm3_compact_hash, sm3_digest
 import json
 from datetime import datetime
@@ -598,6 +604,29 @@ class BlockchainDaemon:
                         return {'valid': False, 'message': 'Invalid amount', 'errors': ['Invalid amount']}
                 except Exception:
                     return {'valid': False, 'message': 'Invalid amount', 'errors': ['Invalid amount']}
+            elif tx_type == "tolkens":
+                for field in ('from', 'to', 'price', 'asset_type', 'asset_hash', 'timestamp', 'signature', 'public_key', 'fee'):
+                    if field not in transaction:
+                        return {'valid': False, 'message': f'Missing field: {field}', 'errors': [f'Missing field: {field}']}
+                if not is_valid_address(str(transaction.get('from', ''))) or not is_valid_address(str(transaction.get('to', ''))):
+                    return {'valid': False, 'message': 'Invalid address format', 'errors': ['Invalid address format']}
+                try:
+                    price = float(transaction.get('price', 0))
+                except Exception:
+                    return {'valid': False, 'message': 'Invalid price', 'errors': ['Invalid price']}
+                if price <= 0:
+                    return {'valid': False, 'message': 'Invalid price', 'errors': ['Invalid price']}
+                if not is_valid_tolken_type(transaction.get('asset_type')):
+                    return {'valid': False, 'message': 'Invalid asset_type', 'errors': ['Invalid asset_type']}
+                if not is_valid_asset_hash(transaction.get('asset_hash')):
+                    return {'valid': False, 'message': 'Invalid asset_hash', 'errors': ['Invalid asset_hash']}
+                try:
+                    fee = float(transaction.get('fee', 0))
+                except Exception:
+                    return {'valid': False, 'message': 'Invalid fee', 'errors': ['Invalid fee']}
+                expected_fee = calculate_tolken_fee(price)
+                if fee < expected_fee:
+                    return {'valid': False, 'message': 'Insufficient fee', 'errors': ['Insufficient fee']}
             # Basic validation
             tx_type = transaction.get('type')
             if not tx_type:
@@ -628,6 +657,32 @@ class BlockchainDaemon:
                         errors.append(f"Missing field: {field}")
                 if not is_valid_address(str(transaction.get('to', ''))):
                     errors.append("Invalid address format")
+            elif tx_type == 'tolkens':
+                required = ['from', 'to', 'price', 'asset_type', 'asset_hash', 'fee']
+                for field in required:
+                    if field not in transaction:
+                        errors.append(f"Missing field: {field}")
+                if not is_valid_address(str(transaction.get('from', ''))) or not is_valid_address(str(transaction.get('to', ''))):
+                    errors.append("Invalid address format")
+                try:
+                    price = float(transaction.get('price', 0))
+                except Exception:
+                    errors.append("Invalid price")
+                    price = 0.0
+                if price <= 0:
+                    errors.append("Invalid price: must be positive")
+                if not is_valid_tolken_type(normalize_tolken_type(transaction.get('asset_type'))):
+                    errors.append("Invalid asset_type")
+                if not is_valid_asset_hash(transaction.get('asset_hash')):
+                    errors.append("Invalid asset_hash")
+                try:
+                    fee = float(transaction.get('fee', 0))
+                except Exception:
+                    errors.append("Invalid fee")
+                    fee = 0.0
+                expected_fee = calculate_tolken_fee(price)
+                if fee < expected_fee:
+                    errors.append("Insufficient fee")
             
             # Security validation if available
             if self.security and not errors:

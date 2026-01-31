@@ -10,6 +10,7 @@ from .transactions.transactions import TransactionManager
 from .core.blockchain import BlockchainManager
 from .core.mempool import MempoolManager
 from .core.wallet_manager import WalletStateManager, get_wallet_manager
+from .tolkens.tolkens import validate_tolken_payload
 
 try:
     from importlib.metadata import version, PackageNotFoundError
@@ -28,5 +29,6 @@ __all__ = [
     'MempoolManager',
     'WalletStateManager',
     'get_wallet_manager',
-    'validate_mining_proof_internal'
+    'validate_mining_proof_internal',
+    'validate_tolken_payload'
 ]

@@ -21,6 +21,12 @@ from ..core.mempool import MempoolManager
 from .validator import TransactionValidator
 from lunalib.utils.hash import sm3_hex
 from lunalib.utils.validation import is_valid_address, sanitize_memo
+from lunalib.tolkens.tolkens import (
+    calculate_tolken_fee,
+    is_valid_asset_hash,
+    is_valid_tolken_type,
+    normalize_tolken_type,
+)
 
 # Import REAL SM2 KeyManager from crypto module
 try:
@@ -37,13 +43,28 @@ class TransactionSecurity:
     
     def validate_transaction(self, transaction: Dict) -> Tuple[bool, str]:
         """Validate transaction structure"""
-        required_fields = ['type', 'from', 'to', 'amount', 'timestamp', 'hash']
+        tx_type = str(transaction.get("type") or "").lower()
+        if tx_type == "tolkens":
+            required_fields = ['type', 'from', 'to', 'price', 'asset_type', 'asset_hash', 'timestamp', 'hash']
+        else:
+            required_fields = ['type', 'from', 'to', 'amount', 'timestamp', 'hash']
         for field in required_fields:
             if field not in transaction:
                 return False, f'Missing required field: {field}'
         
         # Validate amount
-        if transaction['amount'] <= 0 and transaction['type'] != 'reward':
+        if tx_type == "tolkens":
+            try:
+                price = float(transaction.get("price", 0))
+            except Exception:
+                return False, "Invalid price"
+            if price <= 0:
+                return False, "Price must be positive"
+            if not is_valid_tolken_type(transaction.get("asset_type")):
+                return False, "Invalid asset_type"
+            if not is_valid_asset_hash(transaction.get("asset_hash")):
+                return False, "Invalid asset_hash"
+        elif transaction['amount'] <= 0 and transaction['type'] != 'reward':
             return False, 'Amount must be positive'
             
         return True, 'Valid'
@@ -55,6 +76,9 @@ class TransactionSecurity:
         
         if tx_type in ['gtx_genesis', 'reward']:
             return 'very_low', 'System transaction'
+
+        if str(tx_type).lower() == "tolkens":
+            amount = transaction.get("price", amount)
         
         if amount > 1000000:
             return 'high', 'Very large transaction'
@@ -70,7 +94,8 @@ class FeeCalculator:
         self.fee_config = {
             'transfer': 0.001,
             'reward': 0.0,
-            'gtx_genesis': 0.0
+            'gtx_genesis': 0.0,
+            'tolkens': 0.0,
         }
     
     def get_fee(self, transaction_type: str) -> float:
@@ -98,6 +123,9 @@ class TransactionManager:
                         private_key: Optional[str] = None, memo: str = "",
                         transaction_type: str = "transfer", public_key: Optional[str] = None) -> Dict:
         """Create and sign a transaction"""
+
+        if transaction_type == "tolkens":
+            raise ValueError("Use create_tolken_transaction for tolken assets")
 
         if transaction_type in ("transfer", "transaction"):
             if not is_valid_address(from_address) or not is_valid_address(to_address):
@@ -175,6 +203,80 @@ class TransactionManager:
         # Calculate transaction hash (must be last)
         transaction["hash"] = self._calculate_transaction_hash(transaction)
         
+        return transaction
+
+    def create_tolken_transaction(
+        self,
+        from_address: str,
+        to_address: str,
+        price: float,
+        private_key: str,
+        asset_type: str,
+        asset_hash: str,
+        svg_encoding: Optional[str] = None,
+        metadata: Optional[Dict] = None,
+        memo: str = "",
+        public_key: Optional[str] = None,
+    ) -> Dict:
+        """Create and sign a Tolken transaction (NFT-like asset)."""
+        if not is_valid_address(from_address) or not is_valid_address(to_address):
+            raise ValueError("Invalid from/to address")
+
+        if not is_valid_tolken_type(asset_type):
+            raise ValueError("Invalid asset_type")
+
+        if not is_valid_asset_hash(asset_hash):
+            raise ValueError("Invalid asset_hash")
+
+        try:
+            price_val = float(price)
+        except Exception:
+            raise ValueError("Invalid price")
+        if price_val <= 0:
+            raise ValueError("Price must be positive")
+
+        fee = calculate_tolken_fee(price_val)
+
+        transaction = {
+            "type": "tolkens",
+            "from": from_address,
+            "to": to_address,
+            "price": price_val,
+            "amount": price_val,
+            "fee": fee,
+            "nonce": int(time.time() * 1000),
+            "timestamp": int(time.time()),
+            "memo": sanitize_memo(memo),
+            "asset_type": normalize_tolken_type(asset_type),
+            "asset_hash": asset_hash,
+            "version": "2.0",
+        }
+
+        if svg_encoding is not None:
+            transaction["svg_encoding"] = svg_encoding
+        if metadata is not None:
+            transaction["metadata"] = metadata
+
+        if private_key and self.key_manager:
+            tx_string = self._get_signing_data(transaction)
+            transaction["_signing_data"] = tx_string
+            transaction["_signing_hash"] = sm3_hex(tx_string.encode())
+
+            signature = self.key_manager.sign_data(tx_string, private_key)
+
+            if not public_key:
+                public_key = self._public_key_cache.get(private_key)
+                if not public_key:
+                    public_key = self.key_manager.derive_public_key(private_key)
+                    self._public_key_cache[private_key] = public_key
+
+            transaction["signature"] = signature
+            transaction["public_key"] = public_key
+        else:
+            transaction["signature"] = "unsigned"
+            transaction["public_key"] = "unsigned"
+
+        transaction["hash"] = self._calculate_transaction_hash(transaction)
         return transaction
 
     def create_transactions_batch(
@@ -522,3 +624,28 @@ def send_transaction(transaction: Dict) -> Tuple[bool, str]:
     """Send transaction (convenience function)"""
     mgr = get_transaction_manager()
     return mgr.send_transaction(transaction)
+
+def create_tolken_transaction(
+    from_address: str,
+    to_address: str,
+    price: float,
+    private_key: str,
+    asset_type: str,
+    asset_hash: str,
+    svg_encoding: Optional[str] = None,
+    metadata: Optional[Dict] = None,
+    memo: str = "",
+) -> Dict:
+    """Create tolken transaction (convenience function)"""
+    mgr = get_transaction_manager()
+    return mgr.create_tolken_transaction(
+        from_address=from_address,
+        to_address=to_address,
+        price=price,
+        private_key=private_key,
+        asset_type=asset_type,
+        asset_hash=asset_hash,
+        svg_encoding=svg_encoding,
+        metadata=metadata,
+        memo=memo,
+    )
