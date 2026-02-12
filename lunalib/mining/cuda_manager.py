@@ -34,6 +34,7 @@ class CUDAManager:
         self.last_attempts = 0
         self.last_duration = 0.0
         self._stop_event = threading.Event()
+        self.cuda_error = None
         self.cuda_available = self._check_cuda()
         if self.cuda_available:
             self._initialize_cuda_multi()
@@ -50,15 +51,19 @@ class CUDAManager:
         """Check if CUDA is available"""
         try:
             if not CUDA_AVAILABLE:
+                self.cuda_error = "cupy not installed"
                 return False
             self.device_count = cp.cuda.runtime.getDeviceCount()
             if self.device_count > 0:
                 print(f"✅ CUDA is available for accelerated mining ({self.device_count} device(s))")
+                self.cuda_error = None
                 return True
             else:
+                self.cuda_error = "CUDA drivers found but no GPU available"
                 print("❌ CUDA drivers found but no GPU available")
                 return False
         except Exception as e:
+            self.cuda_error = str(e)
             print(f"❌ CUDA check failed: {e}")
             return False
     

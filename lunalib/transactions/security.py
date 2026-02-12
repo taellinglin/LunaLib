@@ -16,7 +16,7 @@ def safe_print(*args, **kwargs):
         print_info(msg)
 import hashlib
 from lunalib.utils.hash import sm3_hex
-from lunalib.utils.validation import is_valid_address
+from lunalib.utils.validation import is_valid_address, is_valid_gtx_denomination
 from lunalib.tolkens.tolkens import (
     calculate_tolken_fee,
     is_valid_asset_hash,
@@ -235,8 +235,7 @@ class TransactionSecurity:
         
         # Validate denomination
         denomination = transaction.get("denomination")
-        valid_denominations = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000]
-        if denomination not in valid_denominations:
+        if not is_valid_gtx_denomination(denomination):
             return False, f"Invalid denomination: {denomination}"
         
         # Validate mining proof

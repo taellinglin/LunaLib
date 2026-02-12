@@ -709,7 +709,7 @@ class LunaWallet:
         total_balance = 0.0
         current_height = None
         import inspect
-        required_conf = int(os.getenv("LUNALIB_REWARD_CONFIRMATIONS", "1"))
+        required_conf = int(os.getenv("LUNALIB_REWARD_CONFIRMATIONS", "6"))
         # Try to get current_height from caller if passed
         frame = inspect.currentframe().f_back
         if frame and 'current_height' in frame.f_locals:
@@ -748,7 +748,7 @@ class LunaWallet:
         pending_out = 0.0
         pending_in = 0.0
 
-        required_conf = int(os.getenv("LUNALIB_REWARD_CONFIRMATIONS", "1"))
+        required_conf = int(os.getenv("LUNALIB_REWARD_CONFIRMATIONS", "6"))
 
         target_norm = self._normalize_address(address)
         for tx in pending_txs:
@@ -1644,6 +1644,13 @@ class LunaWallet:
             # Add to wallets collection
             self.wallets[address] = wallet_data.copy()
 
+            try:
+                from .wallet_manager import get_wallet_manager
+                state_manager = get_wallet_manager()
+                state_manager.register_wallet(address)
+            except Exception:
+                pass
+
             # Set as current wallet
             self._set_current_wallet(wallet_data)
 
@@ -1744,13 +1751,63 @@ class LunaWallet:
             lookback = int(os.getenv("LUNALIB_WALLET_SYNC_LOOKBACK", "50"))
             if lookback < 0:
                 lookback = 0
+            import_lookback = int(os.getenv("LUNALIB_WALLET_IMPORT_LOOKBACK", "0"))
+            if import_lookback < 0:
+                import_lookback = 0
             cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
             max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
-            if end_height <= state_manager.last_blockchain_height:
-                if lookback > 0:
-                    start_height = max(0, end_height - lookback + 1)
-                    blockchain_txs = blockchain.scan_transactions_for_addresses_filtered(
-                        addresses,
+            new_addresses = [
+                addr for addr in addresses
+                if state_manager.get_wallet_scan_marker(addr) < 0
+            ]
+            existing_addresses = [addr for addr in addresses if addr not in new_addresses]
+
+            blockchain_txs: Dict[str, List[Dict]] = {}
+            scanned_addresses: List[str] = []
+
+            if existing_addresses:
+                if end_height <= state_manager.last_blockchain_height:
+                    if lookback > 0:
+                        start_height = max(0, end_height - lookback + 1)
+                        blockchain_txs.update(
+                            blockchain.scan_transactions_for_addresses_filtered(
+                                existing_addresses,
+                                start_height=start_height,
+                                end_height=end_height,
+                                include_rewards=True,
+                                include_transfers=True,
+                                include_gtx_genesis=False,
+                                cache_only=cache_only,
+                                max_range=max_range if max_range > 0 else None,
+                            )
+                        )
+                        scanned_addresses.extend(existing_addresses)
+                else:
+                    start_height = max(0, state_manager.last_blockchain_height + 1)
+                    if lookback > 0:
+                        start_height = min(start_height, max(0, end_height - lookback + 1))
+                    blockchain_txs.update(
+                        blockchain.scan_transactions_for_addresses_filtered(
+                            existing_addresses,
+                            start_height=start_height,
+                            end_height=end_height,
+                            include_rewards=True,
+                            include_transfers=True,
+                            include_gtx_genesis=False,
+                            cache_only=cache_only,
+                            max_range=max_range if max_range > 0 else None,
+                        )
+                    )
+                    scanned_addresses.extend(existing_addresses)
+
+            if new_addresses:
+                if import_lookback > 0:
+                    start_height = max(0, end_height - import_lookback + 1)
+                else:
+                    start_height = 0
+                blockchain_txs.update(
+                    blockchain.scan_transactions_for_addresses_filtered(
+                        new_addresses,
                         start_height=start_height,
                         end_height=end_height,
                         include_rewards=True,
@@ -1759,27 +1816,15 @@ class LunaWallet:
                         cache_only=cache_only,
                         max_range=max_range if max_range > 0 else None,
                     )
-                else:
-                    blockchain_txs = {}
-            else:
-                start_height = max(0, state_manager.last_blockchain_height + 1)
-                if lookback > 0:
-                    start_height = min(start_height, max(0, end_height - lookback + 1))
-                blockchain_txs = blockchain.scan_transactions_for_addresses_filtered(
-                    addresses,
-                    start_height=start_height,
-                    end_height=end_height,
-                    include_rewards=True,
-                    include_transfers=True,
-                    include_gtx_genesis=False,
-                    cache_only=cache_only,
-                    max_range=max_range if max_range > 0 else None,
                 )
+                scanned_addresses.extend(new_addresses)
             mempool_txs = mempool.get_pending_transactions_for_addresses(addresses)
 
             # Sync state manager with the data
             state_manager.sync_wallets_from_sources(blockchain_txs, mempool_txs)
             state_manager.last_blockchain_height = end_height
+            if scanned_addresses:
+                state_manager.set_wallet_scan_markers(scanned_addresses, end_height)
 
             # Update LunaWallet balances from state manager
             balances = state_manager.get_all_balances()

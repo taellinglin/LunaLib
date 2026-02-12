@@ -18,6 +18,7 @@ import json
 import threading
 from typing import Dict, Optional, List, Union, Callable, Tuple, Any
 from ..mining.difficulty import DifficultySystem
+from ..utils.validation import is_valid_gtx_denomination
 from ..gtx.digital_bill import DigitalBill
 from ..transactions.transactions import TransactionManager
 from ..core.blockchain import BlockchainManager
@@ -187,7 +188,7 @@ class GenesisMiner:
             if enforced and user_address and user_address != enforced:
                 safe_print("[WARN] Miner address override denied; using configured miner address.")
                 user_address = enforced
-            if denomination not in [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000]:
+            if not is_valid_gtx_denomination(denomination):
                 return {"success": False, "error": "Invalid denomination"}
 
             difficulty = self.difficulty_system.get_bill_difficulty(denomination)
@@ -257,7 +258,7 @@ class GenesisMiner:
                 previous_hash = latest_block.get('hash', '0' * 64) if latest_block else '0' * 64
             
             # Always refresh mempool from remote before mining
-            pending_txs = self.mempool_manager.get_pending_transactions(fetch_remote=True)
+            pending_txs = self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
             transactions = pending_txs[:10]  # Limit block size
             
             if not transactions:
@@ -370,7 +371,7 @@ class GenesisMiner:
                     self._clear_mined_transactions(transactions)
                     # Reload mempool cache from remote endpoints after block submit
                     if hasattr(self.mempool_manager, 'get_pending_transactions'):
-                        self.mempool_manager.get_pending_transactions(fetch_remote=True)
+                        self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
                 else:
                     safe_print("⚠️ Block mined but submission failed")
                 return {
@@ -666,7 +667,7 @@ class GenesisMiner:
         print(f"Cleared {len(mined_transactions)} mined transactions from mempool")
         # Reload mempool cache from remote endpoints
         if hasattr(self.mempool_manager, 'get_pending_transactions'):
-            self.mempool_manager.get_pending_transactions(fetch_remote=True)
+            self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
     
     def start_auto_bill_mining(self, denominations: List[float], user_address: str, 
                              callback: Callable = None) -> bool:
@@ -724,7 +725,7 @@ class GenesisMiner:
             
             while self.mining_active:
                 # Check mempool for transactions
-                pending_count = len(self.mempool_manager.get_pending_transactions())
+                pending_count = len(self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True))
                 
                 if pending_count > 0:
                     print(f"🔄 Mining block #{block_height} with {pending_count} pending transactions...")
@@ -784,7 +785,7 @@ class GenesisMiner:
             previous_hash = latest_block.get('hash', '0' * 64) if latest_block else '0' * 64
             
             while self.mining_active:
-                pending_count = len(self.mempool_manager.get_pending_transactions())
+                pending_count = len(self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True))
                 
                 if pending_count > 0:
                     print(f"🔄 Mining transaction block #{block_height}...")
@@ -810,7 +811,7 @@ class GenesisMiner:
     
     def get_mining_stats(self) -> Dict:
         """Get comprehensive mining statistics"""
-        pending_txs = self.mempool_manager.get_pending_transactions()
+        pending_txs = self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
         
         return {
             "mining_active": self.mining_active,
@@ -867,7 +868,7 @@ class GenesisMiner:
         try:
             height = self.blockchain_manager.get_blockchain_height()
             connected = self.blockchain_manager.check_network_connection()
-            mempool_size = len(self.mempool_manager.get_pending_transactions())
+            mempool_size = len(self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True))
             
             return {
                 "network_connected": connected,
@@ -981,6 +982,17 @@ class Miner:
         self.cuda_manager = CUDAManager() if self.gpu_enabled else None
         if self.cuda_manager:
             self.cuda_manager.use_sm3_kernel = self.cuda_sm3_kernel
+        self.gpu_unavailable_reason = None
+        if self.gpu_enabled:
+            if not self.cuda_manager:
+                self.gpu_unavailable_reason = "CUDA manager not initialized"
+                self.gpu_enabled = False
+            elif not getattr(self.cuda_manager, "cuda_available", False):
+                self.gpu_unavailable_reason = getattr(self.cuda_manager, "cuda_error", None) or "CUDA not available"
+                self.gpu_enabled = False
+            if not self.gpu_enabled and not self.cpu_enabled:
+                safe_print("[WARN] GPU unavailable; enabling CPU fallback.")
+                self.cpu_enabled = True
         
         # Import security components
         try:
@@ -1313,7 +1325,7 @@ class Miner:
 
     def _get_mempool_size(self) -> int:
         try:
-            pending = self.mempool_manager.get_pending_transactions(fetch_remote=True)
+            pending = self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
             return len(pending)
         except Exception:
             try:
@@ -1546,7 +1558,7 @@ class Miner:
     def _get_fresh_mempool(self) -> List[Dict]:
         """Get fresh mempool transactions with validation"""
         try:
-            mempool = self.mempool_manager.get_pending_transactions()
+            mempool = self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
             if not mempool:
                 mempool = self.blockchain_manager.get_mempool()
             return mempool if mempool else []
@@ -2328,23 +2340,49 @@ class Miner:
     def _clear_transactions_from_mempool(self, transactions: List[Dict]):
         """Remove mined transactions from mempool"""
         try:
+            cleared = 0
             for tx in transactions:
                 # Skip reward transactions (they were created during mining)
                 if tx.get('type') == 'reward' and tx.get('from') == 'network':
                     continue
                 
-                tx_hash = tx.get('hash')
+                tx_hash = self._extract_tx_hash(tx)
                 if tx_hash:
                     # Remove from mempool manager if available
                     try:
                         self.mempool_manager.remove_transaction(tx_hash)
+                        cleared += 1
                     except:
                         pass  # Silent fail if method doesn't exist
-            
-            safe_print(f"🧹 Cleared {len(transactions)} transactions from mempool")
+
+            if hasattr(self.mempool_manager, 'get_pending_transactions'):
+                try:
+                    self.mempool_manager.get_pending_transactions(fetch_remote=True, force_remote=True)
+                except Exception:
+                    pass
+
+            safe_print(f"🧹 Cleared {cleared} transactions from mempool")
             
         except Exception as e:
             safe_print(f"⚠️  Error clearing mempool: {e}")
+
+    def _extract_tx_hash(self, tx: Dict) -> Optional[str]:
+        if not isinstance(tx, dict):
+            return None
+        tx_hash = (
+            tx.get("hash")
+            or tx.get("transaction_hash")
+            or tx.get("tx_hash")
+            or tx.get("txid")
+        )
+        if tx_hash:
+            return tx_hash
+        try:
+            tx_copy = dict(tx)
+            tx_copy.pop("hash", None)
+            return sm3_hex(json.dumps(tx_copy, sort_keys=True).encode())
+        except Exception:
+            return None
 
     def _calculate_final_reward(self, transactions: List[Dict], actual_mining_time: float) -> float:
         """Calculate final reward using actual mining time"""
@@ -2531,5 +2569,9 @@ class Miner:
             ,
             "last_gpu_hashrate": self.last_gpu_hashrate,
             "last_gpu_attempts": self.last_gpu_attempts,
-            "last_gpu_duration": self.last_gpu_duration
+            "last_gpu_duration": self.last_gpu_duration,
+            "gpu_enabled": self.gpu_enabled,
+            "gpu_available": bool(self.cuda_manager and getattr(self.cuda_manager, "cuda_available", False)),
+            "gpu_unavailable_reason": self.gpu_unavailable_reason,
+            "cpu_enabled": self.cpu_enabled
         }

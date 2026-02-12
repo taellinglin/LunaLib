@@ -17,18 +17,19 @@ from .bill_registry import BillRegistry
 from lunalib.mining.cuda_manager import CUDAManager
 from lunalib.core.blockchain import BlockchainManager
 from lunalib.transactions.transactions import TransactionManager
+from lunalib.utils.validation import get_gtx_denominations, is_valid_gtx_denomination
 class GTXGenesis:
     """Main GTX Genesis system manager"""
     
     def __init__(self):
         self.bill_registry = BillRegistry()
         self.cuda_manager = CUDAManager()
-        self.valid_denominations = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000]
+        self.valid_denominations = get_gtx_denominations()
     
-    def create_genesis_bill(self, denomination: int, user_address: str, 
+    def create_genesis_bill(self, denomination: float, user_address: str, 
                           custom_data: Optional[Dict] = None) -> DigitalBill:
         """Create a new GTX Genesis bill"""
-        if denomination not in self.valid_denominations:
+        if not is_valid_gtx_denomination(denomination):
             raise ValueError(f"Invalid denomination. Must be one of: {self.valid_denominations}")
         
         bill_data = custom_data or {}

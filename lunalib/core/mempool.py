@@ -629,9 +629,16 @@ class MempoolManager:
             except Exception as e:
                 print(f"DEBUG: Remote mempool fetch error from {endpoint}: {e}")
 
-    def get_pending_transactions(self, address: str = None, fetch_remote: bool = True) -> List[Dict]:
+    def get_pending_transactions(
+        self,
+        address: str = None,
+        fetch_remote: bool = True,
+        force_remote: bool = False,
+    ) -> List[Dict]:
         """Get all pending transactions, optionally filtered by address; can fetch remote first."""
         if fetch_remote:
+            if force_remote:
+                self._last_remote_fetch = 0.0
             self._maybe_fetch_remote_mempool()
         self._prune_mempool()
 
@@ -653,12 +660,19 @@ class MempoolManager:
         print(f"[MEMPOOL] get_pending_transactions for {address}: {len(transactions)} txs returned")
         return transactions
 
-    def get_pending_transactions_for_addresses(self, addresses: List[str], fetch_remote: bool = True) -> Dict[str, List[Dict]]:
+    def get_pending_transactions_for_addresses(
+        self,
+        addresses: List[str],
+        fetch_remote: bool = True,
+        force_remote: bool = False,
+    ) -> Dict[str, List[Dict]]:
         """Get pending transactions mapped per address in one pass; can fetch remote first."""
         if not addresses:
             return {}
 
         if fetch_remote:
+            if force_remote:
+                self._last_remote_fetch = 0.0
             self._maybe_fetch_remote_mempool()
         self._prune_mempool()
 

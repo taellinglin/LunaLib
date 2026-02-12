@@ -143,6 +143,7 @@ class WalletStateManager:
         self.last_sync_time = 0
         self.sync_in_progress = False
         self.last_blockchain_height = 0
+        self.wallet_scan_markers: Dict[str, int] = {}
         self._last_balance_snapshot: Dict[str, Dict] = {}
         self._last_tx_hashes: Dict[str, Dict[str, Set[str]]] = {}
         self._callback_debounce = float(os.getenv("LUNALIB_UI_DEBOUNCE", "0.25"))
@@ -240,6 +241,7 @@ class WalletStateManager:
         with self.state_lock:
             if address not in self.wallet_states:
                 self.wallet_states[address] = WalletState(address=address)
+                self.wallet_scan_markers.setdefault(address, -1)
                 print_success(f"📱 Registered wallet: {address}")
             return self.wallet_states[address]
     
@@ -249,6 +251,27 @@ class WalletStateManager:
         for addr in addresses:
             states[addr] = self.register_wallet(addr)
         return states
+
+    def get_wallet_scan_marker(self, address: str) -> int:
+        """Get the last scanned block height for a wallet (or -1 if never scanned)."""
+        with self.state_lock:
+            return self.wallet_scan_markers.get(address, -1)
+
+    def set_wallet_scan_marker(self, address: str, height: int) -> None:
+        """Update the last scanned block height for a wallet."""
+        with self.state_lock:
+            self.wallet_scan_markers[address] = int(height)
+
+    def set_wallet_scan_markers(self, addresses: List[str], height: int) -> None:
+        """Update the last scanned block height for multiple wallets."""
+        with self.state_lock:
+            for address in addresses:
+                self.wallet_scan_markers[address] = int(height)
+
+    def get_unscanned_wallets(self) -> List[str]:
+        """Return wallets that have not been scanned yet."""
+        with self.state_lock:
+            return [addr for addr, marker in self.wallet_scan_markers.items() if marker < 0]
     
     def get_wallet_state(self, address: str) -> Optional[WalletState]:
         """Get current state of a wallet"""

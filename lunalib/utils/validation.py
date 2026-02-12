@@ -1,5 +1,6 @@
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple, Dict, Any, List
 
 _ADDRESS_RE = re.compile(r"^LUN_[A-Za-z0-9_]{1,64}$", re.IGNORECASE)
@@ -14,6 +15,43 @@ MAX_MEMO_LEN = 256
 MAX_WALLET_IMPORT_BYTES = 256 * 1024
 MAX_TX_BYTES = 64 * 1024
 MAX_BLOCK_BYTES = 512 * 1024
+
+_GTX_DENOMINATIONS = (
+    Decimal("0.001"),
+    Decimal("0.01"),
+    Decimal("1"),
+    Decimal("10"),
+    Decimal("100"),
+    Decimal("1000"),
+    Decimal("10000"),
+    Decimal("100000"),
+    Decimal("1000000"),
+    Decimal("10000000"),
+    Decimal("100000000"),
+)
+_GTX_DENOMINATION_QUANT = Decimal("0.001")
+
+
+def normalize_gtx_denomination(value: Any) -> Optional[Decimal]:
+    try:
+        denom = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if denom.is_nan() or denom.is_infinite():
+        return None
+    try:
+        return denom.quantize(_GTX_DENOMINATION_QUANT)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def is_valid_gtx_denomination(value: Any) -> bool:
+    denom = normalize_gtx_denomination(value)
+    return denom in _GTX_DENOMINATIONS if denom is not None else False
+
+
+def get_gtx_denominations() -> List[float]:
+    return [float(d) for d in _GTX_DENOMINATIONS]
 
 
 def is_safe_text(value: Optional[str], max_len: int = MAX_TEXT_LEN) -> bool:
@@ -198,8 +236,7 @@ def validate_gtx_genesis_payload(transaction: Any) -> Tuple[bool, str]:
         return False, "Invalid GTX serial format"
 
     denom = transaction.get("denomination")
-    valid_denominations = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000]
-    if denom not in valid_denominations:
+    if not is_valid_gtx_denomination(denom):
         return False, "Invalid denomination"
 
     if not is_valid_tx_hash(transaction.get("hash")):

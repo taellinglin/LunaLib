@@ -134,7 +134,7 @@ Set these with standard environment variable mechanisms (e.g., PowerShell `$env:
 
 ### Wallet / Sync
 
-- `LUNALIB_REWARD_CONFIRMATIONS` (default: `1`) — Reward confirmations required before counted.
+- `LUNALIB_REWARD_CONFIRMATIONS` (default: `6`) — Reward confirmations required before counted.
 - `LUNALIB_BALANCE_UPDATE_INTERVAL` (default: `15`) — Balance refresh cadence (seconds).
 - `LUNALIB_WALLET_MONITOR_INTERVAL` (default: `5`) — Wallet monitor interval (seconds).
 - `LUNALIB_SCAN_TX_LIMIT` (default: `5000`) — Max transactions kept per scan.

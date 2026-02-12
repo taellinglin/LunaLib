@@ -71,34 +71,83 @@ class WalletSyncHelper:
             lookback = int(os.getenv("LUNALIB_WALLET_SYNC_LOOKBACK", "50"))
             if lookback < 0:
                 lookback = 0
+            import_lookback = int(os.getenv("LUNALIB_WALLET_IMPORT_LOOKBACK", "0"))
+            if import_lookback < 0:
+                import_lookback = 0
             cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
             max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
-            if end_height <= self.state_manager.last_blockchain_height:
-                if lookback > 0:
-                    start_height = max(0, end_height - lookback + 1)
-                else:
-                    start_height = end_height
-            else:
-                start_height = max(0, self.state_manager.last_blockchain_height + 1)
-                if lookback > 0:
-                    start_height = min(start_height, max(0, end_height - lookback + 1))
+            new_addresses = [
+                addr for addr in addresses
+                if self.state_manager.get_wallet_scan_marker(addr) < 0
+            ]
+            existing_addresses = [addr for addr in addresses if addr not in new_addresses]
 
-            blockchain_txs = self.blockchain.scan_transactions_for_addresses_filtered(
-                addresses,
-                start_height=start_height,
-                end_height=end_height,
-                include_rewards=True,
-                include_transfers=True,
-                include_gtx_genesis=False,
-                cache_only=cache_only,
-                max_range=max_range if max_range > 0 else None,
-                progress_callback=on_scan_progress,
-            )
+            blockchain_txs: Dict[str, List[Dict]] = {}
+            scanned_addresses: List[str] = []
+
+            if existing_addresses:
+                if end_height <= self.state_manager.last_blockchain_height:
+                    if lookback > 0:
+                        start_height = max(0, end_height - lookback + 1)
+                        blockchain_txs.update(
+                            self.blockchain.scan_transactions_for_addresses_filtered(
+                                existing_addresses,
+                                start_height=start_height,
+                                end_height=end_height,
+                                include_rewards=True,
+                                include_transfers=True,
+                                include_gtx_genesis=False,
+                                cache_only=cache_only,
+                                max_range=max_range if max_range > 0 else None,
+                                progress_callback=on_scan_progress,
+                            )
+                        )
+                        scanned_addresses.extend(existing_addresses)
+                else:
+                    start_height = max(0, self.state_manager.last_blockchain_height + 1)
+                    if lookback > 0:
+                        start_height = min(start_height, max(0, end_height - lookback + 1))
+                    blockchain_txs.update(
+                        self.blockchain.scan_transactions_for_addresses_filtered(
+                            existing_addresses,
+                            start_height=start_height,
+                            end_height=end_height,
+                            include_rewards=True,
+                            include_transfers=True,
+                            include_gtx_genesis=False,
+                            cache_only=cache_only,
+                            max_range=max_range if max_range > 0 else None,
+                            progress_callback=on_scan_progress,
+                        )
+                    )
+                    scanned_addresses.extend(existing_addresses)
+
+            if new_addresses:
+                if import_lookback > 0:
+                    start_height = max(0, end_height - import_lookback + 1)
+                else:
+                    start_height = 0
+                blockchain_txs.update(
+                    self.blockchain.scan_transactions_for_addresses_filtered(
+                        new_addresses,
+                        start_height=start_height,
+                        end_height=end_height,
+                        include_rewards=True,
+                        include_transfers=True,
+                        include_gtx_genesis=False,
+                        cache_only=cache_only,
+                        max_range=max_range if max_range > 0 else None,
+                        progress_callback=on_scan_progress,
+                    )
+                )
+                scanned_addresses.extend(new_addresses)
             mempool_txs = self.mempool.get_pending_transactions_for_addresses(addresses)
             
             # Sync the state manager
             self.state_manager.sync_wallets_from_sources(blockchain_txs, mempool_txs)
             self.state_manager.last_blockchain_height = end_height
+            if scanned_addresses:
+                self.state_manager.set_wallet_scan_markers(scanned_addresses, end_height)
             
             # Update LunaWallet balances if available
             if self.wallet:
@@ -155,29 +204,80 @@ class WalletSyncHelper:
                 lookback = int(os.getenv("LUNALIB_WALLET_SYNC_LOOKBACK", "50"))
                 if lookback < 0:
                     lookback = 0
+                import_lookback = int(os.getenv("LUNALIB_WALLET_IMPORT_LOOKBACK", "0"))
+                if import_lookback < 0:
+                    import_lookback = 0
                 cache_only = os.getenv("LUNALIB_WALLET_SCAN_CACHE_ONLY", "0") == "1"
                 max_range = int(os.getenv("LUNALIB_WALLET_SCAN_MAX_RANGE", "0"))
-                if end_height <= self.state_manager.last_blockchain_height:
-                    if lookback > 0:
-                        start_height = max(0, end_height - lookback + 1)
+                new_addresses = [
+                    addr for addr in addresses
+                    if self.state_manager.get_wallet_scan_marker(addr) < 0
+                ]
+                existing_addresses = [addr for addr in addresses if addr not in new_addresses]
+
+                data: Dict[str, List[Dict]] = {}
+                scanned_addresses: List[str] = []
+
+                if existing_addresses:
+                    if end_height <= self.state_manager.last_blockchain_height:
+                        if lookback > 0:
+                            start_height = max(0, end_height - lookback + 1)
+                            data.update(
+                                self.blockchain.scan_transactions_for_addresses_filtered(
+                                    existing_addresses,
+                                    start_height=start_height,
+                                    end_height=end_height,
+                                    include_rewards=True,
+                                    include_transfers=True,
+                                    include_gtx_genesis=False,
+                                    cache_only=cache_only,
+                                    max_range=max_range if max_range > 0 else None,
+                                    progress_callback=on_scan_progress,
+                                )
+                            )
+                            scanned_addresses.extend(existing_addresses)
                     else:
-                        start_height = end_height
-                else:
-                    start_height = max(0, self.state_manager.last_blockchain_height + 1)
-                    if lookback > 0:
-                        start_height = min(start_height, max(0, end_height - lookback + 1))
-                data = self.blockchain.scan_transactions_for_addresses_filtered(
-                    addresses,
-                    start_height=start_height,
-                    end_height=end_height,
-                    include_rewards=True,
-                    include_transfers=True,
-                    include_gtx_genesis=False,
-                    cache_only=cache_only,
-                    max_range=max_range if max_range > 0 else None,
-                    progress_callback=on_scan_progress,
-                )
+                        start_height = max(0, self.state_manager.last_blockchain_height + 1)
+                        if lookback > 0:
+                            start_height = min(start_height, max(0, end_height - lookback + 1))
+                        data.update(
+                            self.blockchain.scan_transactions_for_addresses_filtered(
+                                existing_addresses,
+                                start_height=start_height,
+                                end_height=end_height,
+                                include_rewards=True,
+                                include_transfers=True,
+                                include_gtx_genesis=False,
+                                cache_only=cache_only,
+                                max_range=max_range if max_range > 0 else None,
+                                progress_callback=on_scan_progress,
+                            )
+                        )
+                        scanned_addresses.extend(existing_addresses)
+
+                if new_addresses:
+                    if import_lookback > 0:
+                        start_height = max(0, end_height - import_lookback + 1)
+                    else:
+                        start_height = 0
+                    data.update(
+                        self.blockchain.scan_transactions_for_addresses_filtered(
+                            new_addresses,
+                            start_height=start_height,
+                            end_height=end_height,
+                            include_rewards=True,
+                            include_transfers=True,
+                            include_gtx_genesis=False,
+                            cache_only=cache_only,
+                            max_range=max_range if max_range > 0 else None,
+                            progress_callback=on_scan_progress,
+                        )
+                    )
+                    scanned_addresses.extend(new_addresses)
+
                 self.state_manager.last_blockchain_height = end_height
+                if scanned_addresses:
+                    self.state_manager.set_wallet_scan_markers(scanned_addresses, end_height)
                 return data
             except Exception as e:
                 print(f"⚠️  Blockchain scan error: {e}")

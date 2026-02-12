@@ -20,19 +20,34 @@ from .bill_registry import BillRegistry
 class DigitalBill:
     """Represents a GTX Genesis digital bill with cryptographic signatures"""
     
-    def __init__(self, denomination, user_address, difficulty, bill_data=None, 
-                 bill_type="GTX_Genesis", front_serial=None, back_serial=None, 
-                 metadata_hash=None, public_key=None, signature=None):
+    def __init__(
+        self,
+        denomination,
+        user_address,
+        difficulty,
+        bill_data=None,
+        bill_type="GTX_Genesis",
+        front_serial=None,
+        back_serial=None,
+        metadata_hash=None,
+        public_key=None,
+        signature=None,
+        timestamp=None,
+        type=None,
+        **_ignored_kwargs,
+    ):
         # GTX Genesis properties
         self.denomination = denomination
         self.user_address = user_address
         self.difficulty = difficulty
         self.bill_data = bill_data or {}
         self.bill_serial = front_serial or self._generate_serial()
-        self.created_time = time.time()
+        self.created_time = time.time() if timestamp is None else float(timestamp)
         self.bill_registry = BillRegistry()
         
         # Signature properties
+        if type is not None and bill_type == "GTX_Genesis":
+            bill_type = type
         self.bill_type = bill_type
         self.front_serial = front_serial or self.bill_serial
         self.back_serial = back_serial or ""
